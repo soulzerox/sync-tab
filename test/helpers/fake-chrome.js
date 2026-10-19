@@ -6,7 +6,7 @@
  * อนุสัญญาเลข id: seed ที่ผู้ทดสอบสร้างใช้ id 100 ขึ้นไป; fake generate ตัวใหม่เริ่มจาก 1
  */
 
-import { STORAGE_KEY } from "../shared/constants.js";
+import { STORAGE_KEY } from "../../shared/constants.js";
 
 /**
  * @param {object} [seed]

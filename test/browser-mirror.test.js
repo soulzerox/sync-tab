@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BrowserMirror } from "../background/browser-mirror.js";
 import { GroupStore } from "../background/group-store.js";
-import { createFakeChrome, tabEvent } from "./fake-chrome.js";
+import { createFakeChrome, tabEvent } from "./helpers/fake-chrome.js";
 
 /** harness — คืน { chrome, store, mirror } พร้อม rebuild แบบ sync เพื่อ assert state */
 function harness(seed = {}) {

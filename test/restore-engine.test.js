@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RestoreEngine } from "../background/restore-engine.js";
 import { GroupStore } from "../background/group-store.js";
-import { createFakeChrome } from "./fake-chrome.js";
+import { createFakeChrome } from "./helpers/fake-chrome.js";
 
 /** ปลูก store ที่มี idle records สำเร็จรูป */
 async function storeWithIdleRecords(chrome, name, urls, color = "blue") {
