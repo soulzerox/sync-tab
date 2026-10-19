@@ -1,476 +1,148 @@
 /**
- * Background Service Worker (Manifest V3)
- * Entry Point: Event Listeners, Lifecycle Management, and Typed Message Router.
+ * SyncTab Group Sync v3 — Service Worker (SOT v3.0.0 §3)
+ *
+ * โครง: ลงทะเบียน chrome listeners แบบ synchronous ตอน service worker ตื่น (MV3)
+ * แล้วทั้งหมดวิ่งผ่าน: BrowserMirror (event→state), GroupStore (seam), RestoreEngine (เปิดกลับ)
+ * Message router (typed RPC, SOT §4) — response ทุกตัว { ok: true, ... } | { ok: false, error }
  */
 
-import { MESSAGE_TYPES } from "../shared/messages.js";
-import { StateManager } from "./state-manager.js";
-import { DiffEngine } from "./diff-engine.js";
-import { NativeAdapter } from "./storage/native-adapter.js";
-import { LocalAdapter } from "./storage/local-adapter.js";
-import { registerRecoveryCheckpointAlarm } from "./recovery-scheduler.js";
+import { MSG } from "../shared/messages.js";
+import { GroupStore } from "./group-store.js";
+import { BrowserMirror } from "./browser-mirror.js";
+import { RestoreEngine } from "./restore-engine.js";
 
-// Initialize Storage Adapter, StateManager, and DiffEngine
-const localAdapter = new LocalAdapter();
-const nativeAdapter = new NativeAdapter(localAdapter);
-const stateManager = new StateManager(nativeAdapter);
-const diffEngine = new DiffEngine(stateManager);
+const API = self.chrome;
 
-/**
- * Updates the extension toolbar badge with the total active tab count.
- */
-async function updateBadge() {
-  if (typeof chrome === "undefined" || !chrome.action || !chrome.action.setBadgeText) return;
+const store = new GroupStore({ storage: API.storage.local });
+const mirror = new BrowserMirror({ chrome: API, store });
+const restore = new RestoreEngine({ chrome: API, store });
+
+// ลงทะเบียน event listeners ทันที (กฎ MV3: sync ระหว่าง first tick ของ SW)
+// attach() จะเรียก reconcile() ตามหลัง (ครอบ startup ทุกเคส: install/update/wake)
+mirror.attach();
+
+// init รอบเดียวต่อ SW lifetime — onMessage ตัวไหนมาก่อนก็รอ waiter นี้ (กัน init ซ้อนกัน)
+const initWaiter = store.init()
+  .then(async migrated => {
+    if (migrated) store.markMigrationNotice(); // SOT §8 — toast ครั้งแรกใน popup
+    else await mirror.reconcile();             // normal wake — ตรวจสถานะเท่านั้น (L10 ไม่เปิดแท็บ)
+  })
+  .catch(async () => {
+    await mirror.reconcile();
+  });
+
+initWaiter.catch(() => { /* โยนไปที่ .catch ด้านบนแล้ว */ });
+
+API.runtime.onInstalled.addListener(() => {
+  void initWaiter.then(() => mirror.reconcile()).catch(() => { /* noop */ });
+});
+
+API.runtime.onStartup.addListener(() => {
+  void initWaiter.then(() => mirror.reconcile()).catch(() => { /* noop */ });
+});
+
+// ------------------------------------------------------------------
+// Message router
+// ------------------------------------------------------------------
+API.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  handleMessage(msg)
+    .then(sendResponse)
+    .catch(err => sendResponse({ ok: false, error: String(err?.message ?? err).slice(0, 160) }));
+  return true; // ตอบแบบ async
+});
+
+async function handleMessage(msg) {
+  if (!msg || typeof msg.type !== "string") return { ok: false, error: "bad-message" };
+
+  switch (msg.type) {
+    case MSG.GET_STATE: {
+      await ensureStoreReady();
+      mirror.flushSync();          // กลืน pending event burst ให้ state ทันสมัยสุด
+      await store.flush();
+      const snapshot = store.snapshot();
+      return {
+        ok: true,
+        version: snapshot.version,
+        groups: snapshot.groups,
+        themePreference: snapshot.themePreference ?? "dark",
+        lastScanAt: snapshot.lastScanAt ?? null,
+        showMigrationNotice: store.consumeMigrationNotice()
+      };
+    }
+
+    case MSG.OPEN_TABS: {
+      await ensureStoreReady();
+      const { groupName, urls } = msg.payload ?? {};
+      if (typeof groupName !== "string" || !Array.isArray(urls)) return { ok: false, error: "bad-payload" };
+      const result = await restore.openTabs({ name: groupName, urls });
+      if (result.ok) scheduleScanAfterRestore(); // ให้ mirror จับแท็บที่เพิ่ง restore ชัวร์ (แม้ event มายังไม่ครบ)
+      return { ...result, type: MSG.OPEN_TABS };
+    }
+
+    case MSG.DELETE_GROUP: {
+      await ensureStoreReady();
+      const { groupName } = msg.payload ?? {};
+      if (typeof groupName !== "string") return { ok: false, error: "bad-payload" };
+      store.deleteGroup(groupName);
+      await store.flush();
+      return { ok: true };
+    }
+
+    case MSG.DELETE_TAB: {
+      await ensureStoreReady();
+      const { groupName, url } = msg.payload ?? {};
+      if (typeof groupName !== "string" || typeof url !== "string") return { ok: false, error: "bad-payload" };
+      store.deleteTab(groupName, url);
+      await store.flush();
+      return { ok: true };
+    }
+
+    case MSG.RENAME_GROUP: {
+      await ensureStoreReady();
+      const { groupName, newName } = msg.payload ?? {};
+      if (typeof groupName !== "string" || typeof newName !== "string" || !newName.trim()) {
+        return { ok: false, error: "bad-payload" };
+      }
+      store.renameGroup(groupName, newName.trim());
+      await renameLiveGroups(groupName, newName.trim()); // สองทาง — L7 (chrome API side)
+      await store.flush();
+      return { ok: true };
+    }
+
+    case MSG.SET_THEME: {
+      await ensureStoreReady();
+      const { theme } = msg.payload ?? {};
+      store.setTheme(theme);
+      await store.flush();
+      return { ok: true, theme: store.themePreference };
+    }
+
+    default:
+      return { ok: false, error: "unknown-message" };
+  }
+}
+
+async function ensureStoreReady() {
+  await initWaiter; // boot ประกาศ waiter ไว้แล้ว — ข้อความที่มาก่อน init จบก็รอที่เดียวกัน
+}
+
+/** หลัง restore เปิดแท็บ — เดิน mirror อีกหน เพื่อไม่ให้สถานะค้างหลับเทยๆ หาก title event ยังไม่ยิง */
+function scheduleScanAfterRestore() {
+  setTimeout(() => {
+    mirror.flushSync();
+  }, 1_200);
+}
+
+/** tabGroups ที่มีชีวิตในเบราว์เซอร์ — ตามชื่อเดิม เปลี่ยน title ตามคำสั่ง rename (สองทาง) */
+async function renameLiveGroups(oldName, newName) {
   try {
-    const tabs = await chrome.tabs.query({});
-    const count = tabs.length;
-    chrome.action.setBadgeText({ text: count > 0 ? String(count) : "" });
-    chrome.action.setBadgeBackgroundColor({ color: "#0078D4" }); // Microsoft Edge Blue
+    const groups = await API.tabGroups.query({});
+    for (const g of groups) {
+      if ((g.title ?? "").trim() === oldName && g.title !== newName) {
+        await API.tabGroups.update(g.id, { title: newName });
+      }
+    }
   } catch {
-    // Ignore in non-tab contexts
+    /* ประเมินว่า tabGroups API หรือกรุ๊ปหายไปก่อนเงียบ ๆ — record ย้ายแล้ว */
   }
-}
-
-/**
- * Collects Tab Groups from all open windows into a Map (groupId -> TabGroup).
- * @returns {Promise<Map<number, chrome.tabGroups.TabGroup>>}
- */
-async function getTabGroupMap(strict = false) {
-  const map = new Map();
-  if (typeof chrome !== "undefined" && chrome.tabGroups && chrome.tabGroups.query) {
-    try {
-      const groups = await chrome.tabGroups.query({});
-      for (const group of groups) {
-        if (group.id) map.set(group.id, group);
-      }
-    } catch (err) {
-      if (strict) throw err;
-      // tabGroups permission might be restricted
-    }
-  } else if (strict) {
-    throw new Error("Tab Groups API unavailable; checkpoint was not captured");
-  }
-  return map;
-}
-
-let startupPromise = null;
-
-/**
- * Ensures startup reconciliation runs exactly once per browser session.
- * Waking up from idle within the same session bypasses reconciliation.
- * @returns {Promise<void>}
- */
-async function ensureStartupReconciled() {
-  if (startupPromise) return startupPromise;
-
-  startupPromise = (async () => {
-    await stateManager.ensureInitialized();
-
-    let isNewBrowserSession = false;
-    let sessionData = {};
-    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
-      try {
-        sessionData = await chrome.storage.session.get(["sessionAlive", "windowUuidMappings"]);
-        if (!sessionData || !sessionData.sessionAlive) {
-          isNewBrowserSession = true;
-          await chrome.storage.session.set({ sessionAlive: true, windowUuidMappings: {} });
-        }
-      } catch {
-        isNewBrowserSession = true;
-      }
-    } else {
-      isNewBrowserSession = true;
-    }
-
-    if (!isNewBrowserSession && typeof chrome !== "undefined" && chrome.windows?.getAll) {
-      try {
-        const liveWindows = await chrome.windows.getAll({ populate: true });
-        stateManager.restoreWindowIdMappings(liveWindows, sessionData.windowUuidMappings || {});
-      } catch (err) {
-        console.warn("[SyncTab] Could not rehydrate window identity mapping:", err);
-      }
-    }
-
-    if (isNewBrowserSession && typeof chrome !== "undefined" && chrome.windows && chrome.windows.getAll) {
-      try {
-        const [liveWindows, groupMap] = await Promise.all([
-          chrome.windows.getAll({ populate: true }),
-          getTabGroupMap()
-        ]);
-        await stateManager.reconcileStartup(liveWindows, groupMap, diffEngine);
-        await updateBadge();
-      } catch (err) {
-        // Do not mark startup complete when the authoritative browser snapshot failed.
-        // The next event can retry instead of permanently skipping reconciliation.
-        startupPromise = null;
-        console.warn("[SyncTab] Startup reconciliation error; will retry:", err);
-      }
-    }
-  })().catch(error => {
-    // Retry startup reconciliation on the next browser event after transient failures.
-    startupPromise = null;
-    throw error;
-  });
-
-  return startupPromise;
-}
-
-/**
- * Triggers full state sync from live browser windows.
- * @param {boolean} [immediate=false]
- */
-let browserSyncPromise = null;
-let browserSyncRequested = false;
-let browserSyncImmediateRequested = false;
-
-/** Serialize browser snapshots and coalesce event storms into a fresh follow-up query. */
-async function syncFromBrowser(immediate = false) {
-  if (typeof chrome === "undefined" || !chrome.windows || !chrome.windows.getAll) return;
-  if (browserSyncPromise) {
-    browserSyncRequested = true;
-    browserSyncImmediateRequested ||= immediate;
-    return browserSyncPromise;
-  }
-
-  browserSyncPromise = (async () => {
-    let nextImmediate = immediate;
-    do {
-      browserSyncRequested = false;
-      const useImmediate = nextImmediate || browserSyncImmediateRequested;
-      browserSyncImmediateRequested = false;
-      await syncFromBrowserOnce(useImmediate);
-      nextImmediate = false;
-    } while (browserSyncRequested);
-  })();
-
-  try {
-    await browserSyncPromise;
-  } finally {
-    browserSyncPromise = null;
-  }
-}
-
-async function syncFromBrowserOnce(immediate) {
-  try {
-    await ensureStartupReconciled();
-    const [liveWindows, groupMap] = await Promise.all([
-      chrome.windows.getAll({ populate: true }),
-      getTabGroupMap()
-    ]);
-    await stateManager.syncActiveWindows(liveWindows, immediate, groupMap);
-    await updateBadge();
-  } catch (err) {
-    console.warn("[SyncTab] syncFromBrowser error:", err);
-  }
-}
-
-let recoveryCapturePromise = null;
-let recoveryCaptureRequested = false;
-let recoveryCaptureSkipLossCheckRequested = false;
-
-/** Coalesce overlapping tab-complete/close events into one capture plus at most one follow-up. */
-async function captureRecoveryCheckpointFromBrowser(skipLossCheck = false) {
-  if (recoveryCapturePromise) {
-    recoveryCaptureRequested = true;
-    recoveryCaptureSkipLossCheckRequested ||= skipLossCheck;
-    return recoveryCapturePromise;
-  }
-
-  recoveryCapturePromise = (async () => {
-    let nextSkipLossCheck = skipLossCheck;
-    do {
-      recoveryCaptureRequested = false;
-      const useSkipLossCheck = nextSkipLossCheck || recoveryCaptureSkipLossCheckRequested;
-      recoveryCaptureSkipLossCheckRequested = false;
-      await captureRecoveryCheckpointFromBrowserOnce(useSkipLossCheck);
-      nextSkipLossCheck = false;
-    } while (recoveryCaptureRequested);
-  })();
-
-  try {
-    await recoveryCapturePromise;
-  } finally {
-    recoveryCapturePromise = null;
-  }
-}
-
-async function captureRecoveryCheckpointFromBrowserOnce(skipLossCheck = false) {
-  try {
-    await ensureStartupReconciled();
-    if (
-      stateManager.isRestoring ||
-      typeof chrome === "undefined" ||
-      !chrome.windows?.getAll
-    ) return;
-
-    const liveWindows = await chrome.windows.getAll({ populate: true });
-    if (!Array.isArray(liveWindows) || liveWindows.length === 0) return;
-
-    let groupMap;
-    try {
-      groupMap = await getTabGroupMap(true);
-    } catch (groupError) {
-      // A missing Tab Groups API must not prevent the core tab list from being saved.
-      await stateManager.syncActiveWindows(liveWindows, true, new Map());
-      await updateBadge();
-      console.warn("[SyncTab] Active state synced; checkpoint skipped because Tab Groups query failed:", groupError);
-      return;
-    }
-
-    // Keep the active mirror fresh even during startup grace; transformWindowData
-    // protects saved website tabs from temporary Edge placeholders in this period.
-    await stateManager.syncActiveWindows(liveWindows, true, groupMap);
-    await updateBadge();
-    if (Date.now() < stateManager.startupGraceUntil) return;
-
-    await stateManager.captureRecoveryCheckpoint(liveWindows, groupMap, Date.now(), { skipLossCheck });
-  } catch (error) {
-    console.warn("[SyncTab] Skipped incomplete recovery checkpoint:", error);
-  }
-}
-
-registerRecoveryCheckpointAlarm(
-  typeof chrome === "undefined" ? null : chrome,
-  captureRecoveryCheckpointFromBrowser
-);
-
-// -------------------------------------------------------------
-// Lifecycle Event Listeners
-// -------------------------------------------------------------
-
-// On Extension Installed or Updated
-if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onInstalled) {
-  chrome.runtime.onInstalled.addListener(async () => {
-    await ensureStartupReconciled();
-    // Checkpoint capture refreshes active state too, so avoid a duplicate full sync/write.
-    await captureRecoveryCheckpointFromBrowser();
-  });
-}
-
-// On Browser Startup / Profile Recovery
-if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onStartup) {
-  chrome.runtime.onStartup.addListener(async () => {
-    await ensureStartupReconciled();
-    await captureRecoveryCheckpointFromBrowser();
-  });
-}
-
-// -------------------------------------------------------------
-// Tab and Window Event Listeners
-// -------------------------------------------------------------
-
-if (typeof chrome !== "undefined" && chrome.tabs) {
-  // Tab created
-  chrome.tabs.onCreated.addListener(async () => {
-    await ensureStartupReconciled();
-    syncFromBrowser(false);
-  });
-
-  // Tab updated (filter to complete status for accurate titles & final URLs)
-  chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
-    if (changeInfo.status === "complete" || changeInfo.title || changeInfo.pinned !== undefined) {
-      await ensureStartupReconciled();
-      if (changeInfo.status === "complete") {
-        // The checkpoint capture also refreshes active state; avoid a duplicate full sync/write.
-        await captureRecoveryCheckpointFromBrowser();
-      } else {
-        syncFromBrowser(false);
-      }
-    }
-  });
-
-  // Tab removed (0ms instant flush)
-  chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-    // If window is closing, do NOT drain tabs from activeWindows!
-    // Allow windows.onRemoved to cleanly archive the full window.
-    if (removeInfo && removeInfo.isWindowClosing) {
-      return;
-    }
-    await ensureStartupReconciled();
-    await captureRecoveryCheckpointFromBrowser();
-  });
-
-  // Tab attached to new window (Cross-Window drag & drop)
-  chrome.tabs.onAttached.addListener(async () => {
-    await ensureStartupReconciled();
-    syncFromBrowser(true);
-  });
-
-  // Tab detached from window
-  chrome.tabs.onDetached.addListener(async () => {
-    await ensureStartupReconciled();
-    syncFromBrowser(true);
-  });
-
-  // Tab moved within window
-  chrome.tabs.onMoved.addListener(async () => {
-    await ensureStartupReconciled();
-    syncFromBrowser(false);
-  });
-}
-
-if (typeof chrome !== "undefined" && chrome.windows) {
-  // Window created
-  chrome.windows.onCreated.addListener(async (win) => {
-    await ensureStartupReconciled();
-    if (win.id) {
-      stateManager.getOrCreateWindowUuid(win.id);
-      syncFromBrowser(true);
-    }
-  });
-
-  // Window removed (0ms instant flush + last window backup)
-  chrome.windows.onRemoved.addListener(async (windowId) => {
-    await ensureStartupReconciled();
-    if (chrome.windows.getAll) {
-      const remaining = await chrome.windows.getAll({ populate: true });
-      await stateManager.onWindowRemoved(windowId, remaining);
-      await updateBadge();
-      // Closing one whole window is an explicit user action, not evidence of a
-      // browser tab-loss incident. Refresh the trusted baseline if other regular
-      // windows remain, but preserve the previous checkpoint when the last closes.
-      if (remaining.some(win => win && !win.incognito && win.type !== "devtools")) {
-        await captureRecoveryCheckpointFromBrowser(true);
-      }
-    }
-  });
-}
-
-// Keyboard shortcuts (Commands)
-if (typeof chrome !== "undefined" && chrome.commands) {
-  chrome.commands.onCommand.addListener(async (command) => {
-    if (command === "trigger_manual_backup") {
-      await stateManager.triggerManualBackup();
-    }
-  });
-}
-
-// -------------------------------------------------------------
-// Typed RPC Message Handler (Popup <-> Service Worker)
-// -------------------------------------------------------------
-
-if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    (async () => {
-      try {
-        await ensureStartupReconciled();
-        if (!message || !message.type) {
-          sendResponse({ success: false, error: "Invalid message payload" });
-          return;
-        }
-
-        switch (message.type) {
-          case MESSAGE_TYPES.GET_STATE: {
-            await stateManager.ensureInitialized();
-            if (Object.keys(stateManager.activeWindows || {}).length === 0 && typeof chrome !== "undefined" && chrome.windows && chrome.windows.getAll) {
-              const [liveWindows, groupMap] = await Promise.all([
-                chrome.windows.getAll({ populate: true }),
-                getTabGroupMap()
-              ]);
-              await stateManager.syncActiveWindows(liveWindows, true, groupMap);
-            }
-            const health = await nativeAdapter.checkHealth();
-            sendResponse({
-              success: true,
-              data: {
-                ...stateManager.getFullSchema(),
-                nativeStatus: health
-              }
-            });
-            break;
-          }
-
-          case MESSAGE_TYPES.SYNC_WINDOW_TO_ACTIVE: {
-            const { targetUuid, activeWindowId, selectedIndices } = message.payload || {};
-            const result = await diffEngine.syncWindowToActive(targetUuid, activeWindowId, selectedIndices);
-            sendResponse(result);
-            break;
-          }
-
-          case MESSAGE_TYPES.RESTORE_RECOVERY_CHECKPOINT: {
-            const { timestamp, activeWindowId } = message.payload || {};
-            const result = await diffEngine.syncRecoveryCheckpointToActive(timestamp, activeWindowId);
-            if (result.success && !result.failedCount) await stateManager.acknowledgeRecoveryAlert();
-            sendResponse(result);
-            break;
-          }
-
-          case MESSAGE_TYPES.ACKNOWLEDGE_RECOVERY_ALERT: {
-            await stateManager.acknowledgeRecoveryAlert();
-            sendResponse({ success: true });
-            break;
-          }
-
-          case MESSAGE_TYPES.DELETE_CLOSED_WINDOW: {
-            const { windowUuid } = message.payload || {};
-            const ok = await stateManager.deleteClosedWindow(windowUuid);
-            sendResponse({ success: ok });
-            break;
-          }
-
-          case MESSAGE_TYPES.DELETE_CLOSED_TAB: {
-            const { windowUuid, tabIndex } = message.payload || {};
-            const ok = await stateManager.deleteClosedTab(windowUuid, tabIndex);
-            sendResponse({ success: ok });
-            break;
-          }
-
-          case MESSAGE_TYPES.RENAME_WINDOW: {
-            const { windowUuid, newName } = message.payload || {};
-            const ok = await stateManager.renameWindow(windowUuid, newName);
-            sendResponse({ success: ok });
-            break;
-          }
-
-          case MESSAGE_TYPES.TOGGLE_PIN_TEMPLATE: {
-            const { windowUuid } = message.payload || {};
-            const ok = await stateManager.togglePinTemplate(windowUuid);
-            sendResponse({ success: ok });
-            break;
-          }
-
-          case MESSAGE_TYPES.TEST_NATIVE_CONNECTION: {
-            const health = await nativeAdapter.checkHealth();
-            sendResponse({ success: true, data: health });
-            break;
-          }
-
-          case MESSAGE_TYPES.TRIGGER_MANUAL_BACKUP: {
-            const backup = await stateManager.triggerManualBackup();
-            sendResponse({ success: true, data: backup });
-            break;
-          }
-
-          case MESSAGE_TYPES.UPDATE_SETTINGS: {
-            await stateManager.updateSettings(message.payload);
-            sendResponse({ success: true, data: stateManager.settings });
-            break;
-          }
-
-          case MESSAGE_TYPES.EXPORT_DATA: {
-            const format = message.payload?.format || "json";
-            const content = stateManager.exportData(format);
-            sendResponse({ success: true, data: content, format });
-            break;
-          }
-
-          case MESSAGE_TYPES.IMPORT_DATA: {
-            const ok = await stateManager.importData(message.payload?.jsonContent);
-            sendResponse({ success: ok });
-            break;
-          }
-
-          default:
-            sendResponse({ success: false, error: `Unhandled message type: ${message.type}` });
-        }
-      } catch (err) {
-        sendResponse({
-          success: false,
-          error: err instanceof Error ? err.message : String(err)
-        });
-      }
-    })();
-
-    return true; // Keep message channel open for async response
-  });
 }
