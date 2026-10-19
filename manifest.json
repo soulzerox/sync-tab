@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "SyncTab — Smart Tab & Window Sync (Edge Linux)",
+  "version": "2.3.0",
+  "description": "Smart Browser Tab & Multi-Window Sync with Missing Tab Restore (Sleeping Tabs) & Persistent SQLite Drive Backup on Ubuntu Linux.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAub1wss3bhJjbmDo3c/rK0GSn7q3kY0VJsQRiQVqlioH9FIS+s4xAsLpIV0ioEgqp259jQd0tWcT+e1xMCEqS0Ydx6IuRHh7Jntld/CJd4wCGp1h7J0+uuifY2Zx6ZMW22PYnphfbDbCyGVSZ7WMyrGNl9mxSYGfoyNwDbYZ7dG8ste3yLGD5gEe5jVn8ktZI+8m+sYo7V8Cgk/R2EjoZ/w0aOTNeyOImGHIzJKcl9FWHsIFlkfrfY243Uh7hvPMwZN2dvzKa97dkjZjYgBHHdNdxlm7CBH1rNhu8O3pocBvMJvX54+wKjysS8pvvf4DKpUaTht9pv1ZPsXbyuBz0rwIDAQAB",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "unlimitedStorage",
+    "nativeMessaging",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "SyncTab Manager (Alt+Shift+S)",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
+      },
+      "description": "Open SyncTab Manager Popup"
+    },
+    "trigger_manual_backup": {
+      "suggested_key": {
+        "default": "Alt+Shift+B",
+        "mac": "Alt+Shift+B"
+      },
+      "description": "Trigger Manual Snapshot Backup"
+    }
+  }
+}

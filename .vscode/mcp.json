@@ -1,0 +1,52 @@
+{
+  "mcpServers": {
+    "memory": {
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/Documents/Src Code/mcp-servers/src/memory/dist/index.js"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "/home/qwerty/.cline/data/memory/knowledge-graph.jsonl"
+      }
+    },
+    "thai-rag-mcp": {
+      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
+      "args": [
+        "/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"
+      ]
+    },
+    "godkiller": {
+      "command": "ssh",
+      "args": [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "root@192.168.1.189",
+        "PYTHONWARNINGS=ignore /root/.godkiller-venv/bin/godkiller-mcp-fixed"
+      ]
+    },
+    "ui-skills": {
+      "serverUrl": "https://www.ui-skills.com/mcp"
+    },
+    "filesystem": {
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/home/qwerty/Documents/Src Code"
+      ]
+    },
+    "sequentialthinking": {
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@modelcontextprotocol/server-sequential-thinking/dist/index.js"
+      ]
+    },
+    "context7": {
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@upstash/context7-mcp/dist/index.js"
+      ]
+    }
+  }
+}

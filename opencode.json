@@ -1,0 +1,67 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memory": {
+      "type": "local",
+      "command": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+        "/home/qwerty/Documents/Src Code/mcp-servers/src/memory/dist/index.js"
+      ],
+      "enabled": true,
+      "environment": {
+        "MEMORY_FILE_PATH": "/home/qwerty/.cline/data/memory/knowledge-graph.jsonl"
+      }
+    },
+    "thai-rag-mcp": {
+      "type": "local",
+      "command": [
+        "/home/qwerty/thai-rag-mcp/venv/bin/python3",
+        "/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"
+      ],
+      "enabled": true
+    },
+    "godkiller": {
+      "type": "local",
+      "command": [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "root@192.168.1.189",
+        "PYTHONWARNINGS=ignore /root/.godkiller-venv/bin/godkiller-mcp-fixed"
+      ],
+      "enabled": true
+    },
+    "filesystem": {
+      "type": "local",
+      "command": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/home/qwerty/Documents/Src Code"
+      ],
+      "enabled": true
+    },
+    "sequentialthinking": {
+      "type": "local",
+      "command": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@modelcontextprotocol/server-sequential-thinking/dist/index.js"
+      ],
+      "enabled": true
+    },
+    "context7": {
+      "type": "local",
+      "command": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@upstash/context7-mcp/dist/index.js"
+      ],
+      "enabled": true
+    },
+    "ui-skills": {
+      "type": "remote",
+      "url": "https://www.ui-skills.com/mcp",
+      "enabled": true
+    }
+  }
+}

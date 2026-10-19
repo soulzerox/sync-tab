@@ -1,0 +1,10 @@
+{
+  "name": "com.synctab.native",
+  "description": "SyncTab Native SQLite Bridge for Microsoft Edge on Ubuntu Linux",
+  "path": "/home/qwerty/Documents/Src Code/sync tab/native-host/native_host.py",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://gacoeejinnjilkgcjpbdgchngndpbjaa/",
+    "chrome-extension://*/"
+  ]
+}

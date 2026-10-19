@@ -1,0 +1,15 @@
+# MCP Server Execution Priority — ลำดับความสำคัญในการใช้งาน MCP Server
+
+เรียงจากสำคัญสุด → น้อยสุด ใช้ทุกเซสชันในทุกโปรเจกต์:
+
+| ลำดับ | MCP Server | บทบาทหลัก | จังหวะที่ต้องใช้ | ข้อบังคับ |
+|---|---|---|---|---|
+| **P1** | **`memory`** (knowledge-graph) | work-log ของงานปัจจุบัน (Realtime Working Memory) | ทุก task — อ่านก่อนเริ่ม, เขียนทุก step สำคัญ (realtime), เชื่อมโยงเมื่อจบ | ✅ **ห้ามข้าม (Realtime)** |
+| **P2** | **`openviking`** | ความจำถาวร · docs · retrieval-first · auto re-embed | ทุก session — search ก่อนตอบเรื่องอดีต, remember ข้อมูลถาวร, ค้นหาโค้ดผ่าน index | ✅ **ห้ามข้าม** |
+| **P2** | **`thai-rag-mcp`** | ความจำถาวร · 100% Local RAG · retrieval-first | ทุก session — recall ก่อนตอบเรื่องอดีต, remember ข้อมูลถาวร, code_search ค้นหาโค้ด | ✅ **ห้ามข้าม** |
+| **P3** | **`godkiller`** | Code Intel · Safety Pre-check · Orchestration · Verification | ทุกครั้งที่พัฒนา/แก้โค้ด — วางแผนโหมด, ตรวจ blast radius/edit safe, verify ก่อนจบงาน | ✅ |
+| **P4** | **`sequentialthinking`** | วิเคราะห์/วางแผนแบบ step-by-step ที่ revise ได้ | ก่อนเริ่ม task ซับซ้อน (root-cause, architecture, multi-file refactor) | เฉพาะ task ซับซ้อน |
+| **P5** | **`context7`** | docs สดและตัวอย่างโค้ดตรงเวอร์ชันของ lib/framework/SDK/API | ก่อนเขียนโค้ดที่แตะ external lib/SDK/API ภายนอก | เฉพาะ external API |
+| **P6** | **`filesystem`** | ไฟล์ข้ามโปรเจกต์ / batch file operations | ตามโอกาส — read_multiple_files, directory_tree, move_file ฯลฯ | เฉพาะ batch/cross-project |
+| **P7** | **`ui-skills`** | UI/UX & Frontend Best Practices & Skills | เมื่อออกแบบหรือพัฒนา UI/UX, Component layout | เฉพาะงาน UI/Frontend |
+| — | **built-in tools** | native search / single-file edit เฉพาะจุด | fallback เมื่อไม่มี MCP tool ที่เหมาะสม หรือค้นหาใน workspace เดี่ยว | **fallback สุดท้าย** |

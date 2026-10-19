@@ -1,0 +1,22 @@
+{
+  "name": "browser-tab-sync-edge",
+  "version": "2.3.0",
+  "description": "Smart Browser Tab Sync & Missing Tab Restore Extension for Microsoft Edge on Ubuntu Linux",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "test:native": "python3 -m unittest discover -s test -p 'test_*.py'"
+  },
+  "keywords": [
+    "edge",
+    "extension",
+    "tab-sync",
+    "sleeping-tabs",
+    "sqlite",
+    "ubuntu",
+    "manifest-v3"
+  ],
+  "author": "Antigravity",
+  "license": "MIT"
+}

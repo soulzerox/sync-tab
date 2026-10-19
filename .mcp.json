@@ -1,0 +1,80 @@
+{
+  "mcpServers": {
+    "memory": {
+      "description": "P1 — Knowledge Graph work-log (realtime). Always use read_graph/search_nodes before tasks, create_entities/add_observations during, create_relations on completion.",
+      "type": "stdio",
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/Documents/Src Code/mcp-servers/src/memory/dist/index.js"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "/home/qwerty/.cline/data/memory/knowledge-graph.jsonl"
+      },
+      "disabled": false,
+      "timeout": 300
+    },
+    "thai-rag-mcp": {
+      "description": "P2 — 100% Local persistent memory and Code RAG with Ollama. Use recall/remember for agent memory, code_search/code_context for AST codebase retrieval.",
+      "type": "stdio",
+      "command": "/home/qwerty/thai-rag-mcp/venv/bin/python3",
+      "args": [
+        "/home/qwerty/thai-rag-mcp/thai_rag_context_mcp.py"
+      ],
+      "disabled": false,
+      "timeout": 300
+    },
+    "godkiller": {
+      "description": "P3 — Code Intel & Safety Pre-check & Verification. Use gk_route/gk_mode to plan, gk_code/gk_task to inspect/check blast radius, gk_verify to test.",
+      "type": "stdio",
+      "command": "ssh",
+      "args": [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "root@192.168.1.189",
+        "PYTHONWARNINGS=ignore /root/.godkiller-venv/bin/godkiller-mcp-fixed"
+      ],
+      "disabled": false,
+      "timeout": 300
+    },
+    "sequential-thinking": {
+      "description": "P4 — Use for complex multi-step analysis: root-cause debugging, architecture/design, multi-file refactors, planning.",
+      "type": "stdio",
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@modelcontextprotocol/server-sequential-thinking/dist/index.js"
+      ],
+      "disabled": false,
+      "timeout": 300
+    },
+    "context7": {
+      "description": "P5 — Fresh docs for external libraries/SDKs/APIs. Call resolve-library-id → query-docs before writing external API code.",
+      "type": "stdio",
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@upstash/context7-mcp/dist/index.js"
+      ],
+      "disabled": false,
+      "timeout": 300
+    },
+    "filesystem": {
+      "description": "P6 — Cross-project file ops under /home/qwerty/Documents/Src Code. Use read_multiple_files, directory_tree, search_files for batch/cross-project work.",
+      "type": "stdio",
+      "command": "/home/qwerty/.nvm/versions/node/v22.23.2/bin/node",
+      "args": [
+        "/home/qwerty/.nvm/versions/node/v22.23.2/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/home/qwerty/Documents/Src Code"
+      ],
+      "disabled": false,
+      "timeout": 300
+    },
+    "ui-skills": {
+      "description": "P7 — UI/UX & Frontend Best Practices & Skills.",
+      "type": "http",
+      "url": "https://www.ui-skills.com/mcp",
+      "disabled": false,
+      "timeout": 300
+    }
+  }
+}
