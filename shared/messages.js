@@ -1,21 +1,15 @@
 /**
- * Message Action Constants for Typed Unidirectional Message Passing
- * Used between Popup UI and Background Service Worker
+ * Message constants (Popup ↔ Service Worker) — SyncTab Group Sync v3
+ * SOT §4: typed RPC, response ทุกเมสเสจ = { ok: true, ...payload } | { ok: false, error }
  */
 
-export const MESSAGE_TYPES = Object.freeze({
+export const MSG = Object.freeze({
   GET_STATE: "GET_STATE",
-  SYNC_WINDOW_TO_ACTIVE: "SYNC_WINDOW_TO_ACTIVE",
-  DELETE_CLOSED_WINDOW: "DELETE_CLOSED_WINDOW",
-  DELETE_CLOSED_TAB: "DELETE_CLOSED_TAB",
-  RENAME_WINDOW: "RENAME_WINDOW",
-  TOGGLE_PIN_TEMPLATE: "TOGGLE_PIN_TEMPLATE",
-  TEST_NATIVE_CONNECTION: "TEST_NATIVE_CONNECTION",
-  TRIGGER_MANUAL_BACKUP: "TRIGGER_MANUAL_BACKUP",
-  RESTORE_RECOVERY_CHECKPOINT: "RESTORE_RECOVERY_CHECKPOINT",
-  ACKNOWLEDGE_RECOVERY_ALERT: "ACKNOWLEDGE_RECOVERY_ALERT",
-  RESTORE_SESSION_BACKUP: "RESTORE_SESSION_BACKUP",
-  UPDATE_SETTINGS: "UPDATE_SETTINGS",
-  EXPORT_DATA: "EXPORT_DATA",
-  IMPORT_DATA: "IMPORT_DATA"
+  OPEN_TABS: "OPEN_TABS",
+  DELETE_GROUP: "DELETE_GROUP",
+  DELETE_TAB: "DELETE_TAB",
+  RENAME_GROUP: "RENAME_GROUP",
+  SET_THEME: "SET_THEME"
 });
+
+export const THEME_VALUES = Object.freeze({ DARK: "dark", LIGHT: "light", AUTO: "auto" });
