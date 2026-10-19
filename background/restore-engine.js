@@ -22,7 +22,7 @@ export class RestoreEngine {
    * @param {import("./group-store.js").GroupStore} deps.store
    * @param {(ms: number) => Promise<void>} [deps.sleep] inject สำหรับเทส (default จริง)
    */
-  constructor({ chrome, store, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  constructor({ chrome, store, sleep = ms => new Promise(resolve => globalThis.setTimeout(resolve, ms)) }) {
     this.#chrome = chrome;
     this.#store = store;
     this.#sleep = sleep;

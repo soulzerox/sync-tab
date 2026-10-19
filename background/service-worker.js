@@ -128,7 +128,7 @@ async function ensureStoreReady() {
 
 /** หลัง restore เปิดแท็บ — เดิน mirror อีกหน เพื่อไม่ให้สถานะค้างหลับเทยๆ หาก title event ยังไม่ยิง */
 function scheduleScanAfterRestore() {
-  setTimeout(() => {
+  globalThis.setTimeout(() => {   // ผ่าน globalThis — กัน Illegal invocation (Edge SW)
     mirror.flushSync();
   }, 1_200);
 }

@@ -303,7 +303,7 @@ export class BrowserMirror {
 
   #scheduleEmit() {
     if (this.#emitTimer !== null) return;
-    this.#emitTimer = setTimeout(() => {
+    this.#emitTimer = globalThis.setTimeout(() => {   // ผ่าน globalThis — กัน Illegal invocation (Edge SW)
       this.#emitTimer = null;
       this.#syncNow();
     }, this.#emitDebounceMs);
@@ -312,7 +312,7 @@ export class BrowserMirror {
   /** บังคับ rebuild ทันที (ใช้หลัง popup ทำงานกับ record ที่ต้องการสถานะล่าสุด) */
   flushSync() {
     if (this.#emitTimer !== null) {
-      clearTimeout(this.#emitTimer);
+      globalThis.clearTimeout(this.#emitTimer);
       this.#emitTimer = null;
     }
     this.#syncNow();

@@ -27,9 +27,13 @@ function validColor(color) {
   return typeof color === "string" && VALID_COLORS.has(color) ? color : DEFAULT_GROUP_COLOR;
 }
 
-function clone(value) {
-  return structuredClone(value);
-}
+/**
+ * MV3 service worker ของ Chromium หลายบิลด์ (รวม Edge):
+ * ฟังก์ชัน platform แบบ WebIDL เมื่อถูกเก็บ reference แล้วเรียกแบบ detach (ไม่มี receiver)
+ * จะโยน TypeError: Illegal invocation — กติกาฉบับนี้: เรียกผ่าน `globalThis.x(...)` เสมอ
+ * (member expression มี receiver = global ตลอด ไม่มีทางพัง)
+ */
+const CLONE = value => globalThis.structuredClone(value);
 
 function nextOrder(record) {
   let max = -1;
@@ -54,10 +58,10 @@ export class GroupStore {
    *        chrome.storage.local-compatible area (production) หรือ fake (test)
    * @param {() => number} [opts.now]
    * @param {number} [opts.saveDelayMs] debounce ก่อน persist (test ส่ง 0)
-   * @param {typeof setTimeout} [opts.setTimeoutFn] inject เพื่อเทส (default global setTimeout)
+   * @param {typeof setTimeout} [opts.setTimeoutFn] inject เพื่อเทส (default ผ่าน globalThis — กัน Illegal invocation ใน Edge SW)
    * @param {typeof clearTimeout} [opts.clearTimeoutFn]
    */
-  constructor({ storage, now = Date.now, saveDelayMs = TIMINGS.SAVE_BATCH_MS, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout }) {
+  constructor({ storage, now = Date.now, saveDelayMs = TIMINGS.SAVE_BATCH_MS, setTimeoutFn = (fn, ms) => globalThis.setTimeout(fn, ms), clearTimeoutFn = id => globalThis.clearTimeout(id) }) {
     this.#storage = storage;
     this.#now = now;
     this.#saveDelayMs = saveDelayMs;
@@ -115,12 +119,12 @@ export class GroupStore {
 
   /** Snapshot ทั้งหมด (deep copy — กัน caller แก้ข้อมูลภายใน) */
   snapshot() {
-    return clone(this.#schema);
+    return CLONE(this.#schema);
   }
 
   /** Snapshot เฉพาะกลุ่ม (Record<name, GroupRecord>) */
   getGroups() {
-    return clone(this.#schema.groups);
+    return CLONE(this.#schema.groups);
   }
 
   get themePreference() {
@@ -383,6 +387,6 @@ export class GroupStore {
   async flush() {
     if (this.#pendingPersist) await this.#pendingPersist;
     this.#pendingPersist = null;
-    return this.#schema ? clone(this.#schema) : null;
+    return this.#schema ? CLONE(this.#schema) : null;
   }
 }

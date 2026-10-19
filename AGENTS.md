@@ -20,5 +20,6 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 - All state mutations go through `GroupStore`; mirror is read-only over registries. Persist is debounced (80 ms) — end writes with `await store.flush()` when determinism matters.
 - Tab/group identity = exact group name (trim-able but case-sensitive window-agnostic); ungrouped tabs, unnamed groups, incognito, and privileged URLs (`edge://*`, etc.) are never tracked (L1).
 - Restore simulates a staggered sequence: `tabs.create → tabs.group → tabGroups.update(color) → tabs.discard` per tab, always discard LAST (sleeping tabs), guarded by a per-name mutex; live group lookup happens in the focused window only.
-- Tests run with `npm test` (`node --test`, ESM). Keep tests framework-free; reuse `test/fake-chrome.js` (seed convention: explicit ids ≥ 100; fake-generated ids start at 1).
+- Tests run with `npm test` (`node --test`, ESM). Keep tests framework-free; reuse `test/helpers/fake-chrome.js` (seed convention: explicit ids ≥ 100; fake-generated ids start at 1).
+- In service-worker context, ALWAYS call platform globals through member expressions — `globalThis.setTimeout(...)` / `globalThis.structuredClone(v)` — never keep a detached reference (`const s = setTimeout`). Detached WebIDL functions throw `TypeError: Illegal invocation` in some Chromium/Edge SW builds (popup pages are forgiving, SW is not).
 - No bundler/build step; plain ES modules everywhere.
