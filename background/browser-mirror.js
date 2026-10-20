@@ -14,6 +14,7 @@
 
 import { isIgnoredUrl, normalizeUrl, sanitizeTitle } from "./url-sanitizer.js";
 import { DEFAULT_GROUP_COLOR, CHROMIUM_GROUP_COLORS, TIMINGS } from "../shared/constants.js";
+import { dbg } from "./debug-log.js";
 
 const VALID_COLORS = new Set(CHROMIUM_GROUP_COLORS);
 const TAB_ID_NONE = -1;
@@ -68,6 +69,7 @@ export class BrowserMirror {
   // ------------------------------------------------------------------
   async reconcile() {
     const c = this.#chrome;
+    dbg("mirror", "reconcile:start", {});
     const [windows, allGroups] = await Promise.all([
       c.windows.getAll({ populate: true }),
       c.tabGroups.query({})
@@ -93,6 +95,7 @@ export class BrowserMirror {
         const bind = this.#store.liveBinding(t.id);
         const realUrl = normalizeUrl(t.url || t.pendingUrl || "");
         if (bind && realUrl && realUrl !== bind.urlKey && !this.#store.isRestoredTab(t.id)) {
+          dbg("mirror", "binding:repair", { tabId: t.id, from: bind.urlKey, to: realUrl });
           this.#pendingMoves.push({ g: bind.groupName, fromKey: bind.urlKey, toKey: realUrl, tabId: t.id });
         }
         this.#tryRegisterTab(t, true);
@@ -107,6 +110,7 @@ export class BrowserMirror {
     }
     this.#store.pruneLiveBindings([...this.#tabsByTabId.keys(), ...aliveIds]);
     this.#syncNow({ markScan: true });
+    dbg("mirror", "reconcile:done", { windows: windows.length, tabs: this.#tabsByTabId.size, groups: this.#groupsByGroupId.size, alive: aliveIds.size });
   }
 
   #resetRegistries() {
@@ -157,6 +161,7 @@ export class BrowserMirror {
     if (tab.discarded) {
       if (prev) {
         prev.discarded = true; // ตื่น → หลับ (Edge นอนให้เอง): คงสถานะ ไม่อัปเดตข้อมูลหน้า
+        dbg("mirror", "tab:slept", { tabId, url: prev.url });
         this.#scheduleEmit();
         return;
       }
@@ -167,6 +172,7 @@ export class BrowserMirror {
     if (prev && prev.discarded) {
       prev.discarded = false; // ผู้ใช้กดตื่นแท็บที่หลับ (Edge sleeping / แท็บที่ restore ไว้) — กลับมาเป็นตื่นตามจริง
       this.#store.clearSleepingFlag(tabId); // ถอนธง s — แท็บผลจาก restore ที่ถูกเอาไปใช้จริง นับตื่นตั้งแต่นี้
+      dbg("mirror", "tab:wake", { tabId, url: prev.url });
     }
 
     // v3.1 L14 — แท็บที่ผูกไว้เปิดหน้าใหม่: คิว "record เลื่อนตาม" (คิดหลัง rebuild ต่อ burst)
@@ -179,6 +185,7 @@ export class BrowserMirror {
       const groupName = this.#groupsByGroupId.get(prev.groupId)?.name ?? "";
       const bind = this.#store.liveBinding(tabId);
       if (bind && bind.groupName === groupName && bind.urlKey === prev.url && !this.#store.isRestoredTab(tabId)) {
+        dbg("mirror", "move:queued", { tabId, from: prev.url, to: newUrl });
         this.#pendingMoves.push({ g: groupName, fromKey: prev.url, toKey: newUrl, tabId });
       }
       if (groupName) this.#store.setLiveBinding(tabId, { groupName, urlKey: newUrl });
@@ -194,6 +201,7 @@ export class BrowserMirror {
     const bind = this.#store.liveBinding(tabId);
     // L13 — ผู้ใช้ปิดแท็บตัวเดียว (isWindowClosing=false) และแท็บไม่ใช่ origin ป้องกัน (restore/scan-first)
     if (removeInfo?.isWindowClosing !== true && bind && bind.groupName && bind.urlKey && !bind.restored) {
+      dbg("mirror", "delete:queued", { tabId, group: bind.groupName, key: bind.urlKey });
       this.#pendingDeletes.push({ g: bind.groupName, k: bind.urlKey });
     }
     this.#forgetTab(tabId);
@@ -292,11 +300,11 @@ export class BrowserMirror {
    * @param {string} [urlOverride] URL จริงจาก changeInfo/pendingUrl (แท็บใหม่ที่ url ยังว่าง) */
   #tryRegisterTab(t, peek = false, urlOverride = "") {
     if (!t || typeof t.id !== "number") return false;
-    if (t.incognito || this.#incognitoWindows.has(t.windowId)) return false;
+    if (t.incognito || this.#incognitoWindows.has(t.windowId)) { dbg("mirror", "register:skip", { tabId: t.id, reason: "incognito" }); return false; }
     const rawUrl = urlOverride || t.pendingUrl || t.url || "";
     const url = normalizeUrl(rawUrl);
-    if (!url || isIgnoredUrl(rawUrl)) return false;
-    if (typeof t.groupId !== "number" || t.groupId === TAB_ID_NONE) return false;
+    if (!url || isIgnoredUrl(rawUrl)) { dbg("mirror", "register:skip", { tabId: t.id, reason: "no-url", rawUrl: rawUrl.slice(0, 120) }); return false; }
+    if (typeof t.groupId !== "number" || t.groupId === TAB_ID_NONE) { dbg("mirror", "register:skip", { tabId: t.id, reason: "ungrouped", url }); return false; }
 
     // สถานะ "หลับ" ที่ registry จำไว้ (buildLiveMap คิดจากธง s ใน binding เป็นหลัก — ธงนี้ไว้ตามจับการตื่น/หลับเปลี่ยนมือ):
     //  - t.discarded = Edge Sleeping Tabs ของผู้ใช้ (เปิดค้างจริง → ยังนับเป็นตื่น)
@@ -330,6 +338,7 @@ export class BrowserMirror {
 
     // กลุ่มหายไปจาก registry (rare — group event ทำงานก่อน tab event แต่บางแท็บรับก่อน)
     if (!this.#groupsByGroupId.has(t.groupId)) this.#rememberGroupFromTab(t);
+    dbg("mirror", "register:ok", { tabId: t.id, url, groupId: t.groupId, asSleeping, peek });
     return true;
   }
 
@@ -378,11 +387,12 @@ export class BrowserMirror {
   // ------------------------------------------------------------------
   #buildLiveMap() {
     const live = new Map();
+    let skippedSleeping = 0; // v3.3 — นับแท็บผลจาก restore ที่ถูกกันออกจาก liveMap (log ต่อ sync)
     for (const [tabId, entry] of this.#tabsByTabId) {
       // v3.1 L17 — แท็บผลจาก restore (ธง s ใน binding) ไม่เข้า liveMap — record ต้นทางคงหลับตาม §6
       // ไม่แคร์สถานะ discarded ปัจจุบัน เพราะช่วง create→discard ของ flow เอง อาจได้รับ event แบบ awake ก่อน mark
       // (มีเพียง "ผู้ใช้กดตื่นจริง" เท่านั้นที่ถอนธง s — handleTabUpdated เส้นตื่น)
-      if (this.#store.liveBinding(tabId)?.sleeping) continue;
+      if (this.#store.liveBinding(tabId)?.sleeping) { skippedSleeping += 1; continue; }
       const g = this.#groupsByGroupId.get(entry.groupId);
       const name = g?.name ?? "";
       if (!name) continue; // unnamed — ไม่จับ
@@ -400,13 +410,14 @@ export class BrowserMirror {
         seat.tabs[entry.url] = { title: entry.title, favIconUrl: entry.favIconUrl, count: 1 };
       }
     }
-    return live;
+    return { live, skippedSleeping };
   }
 
   /** rebuild → เขียนเข้าคลัง (store diff + persist เอง) แล้วรันงานคิว v3.1 ที่ต้องเกิด "หลัง" diff แล้ว */
   #syncNow({ markScan = false } = {}) {
     if (!this.#store.ready) return; // init ยังไม่จบ — ข้าม (event หลัง init จะสร้างครบเอง)
-    const live = Object.fromEntries(this.#buildLiveMap());
+    const { live: liveMap, skippedSleeping } = this.#buildLiveMap();
+    const live = Object.fromEntries(liveMap);
     this.#store.applyLiveMap(live, { markScan });
 
     // v3.1 — เลื่อน record ตามแท็บ (L14) ก่อน แล้วค่อยลบของแท็บที่ปิดเอง (L13)
@@ -424,6 +435,12 @@ export class BrowserMirror {
       const deletes = this.#pendingDeletes.splice(0).filter(d => !live?.[d.g]?.tabs?.[d.k]);
       if (deletes.length) this.#store.consumeDeletedTabs(deletes);
     }
+    dbg("mirror", "sync", {
+      groups: liveMap.size, tabs: this.#tabsByTabId.size,
+      skippedSleeping, // แท็บผลจาก restore ที่ยังหลับตาม design
+      liveRows: Object.values(live).reduce((n, g) => n + Object.keys(g.tabs ?? {}).length, 0),
+      markScan
+    });
   }
 
   #scheduleEmit() {

@@ -5,9 +5,10 @@
  * ที่ inject เข้ามา (production = chrome.storage.local, test = fake object)
  *
  * แนวคิดหลัก: "สถานะบน browser คือ graph ของ event, คลังคือ projection"
- * - mirror ส่ง `applyLiveMap(liveMap)` ทุกครั้งที่ browser state 别名เปลี่ยน → store diff กับ record เดิม
+ * - mirror ส่ง `applyLiveMap(liveMap)` ทุกครั้งที่ browser state เปลี่ยน → store diff กับ record เดิม
  *   (ids, timestamps, สถานะ ตื่น/หลับ, rename-merge → ถูก encapsulate อยู่ที่นี่ทั้งหมด)
  * - popup จัดการผ่านชุดคำสั่งชัด ๆ: rename/deleteGroup/deleteTab
+ * - debug: ทุก mutation สำคัญถูกบันทึกผ่าน dbg() (ดู background/debug-log.js)
  */
 
 import {
@@ -20,6 +21,7 @@ import {
   THEME_PREFERENCES
 } from "../shared/constants.js";
 import { normalizeUrl, sanitizeTitle } from "./url-sanitizer.js";
+import { dbg } from "./debug-log.js";
 
 const VALID_COLORS = new Set(CHROMIUM_GROUP_COLORS);
 
@@ -197,18 +199,25 @@ export class GroupStore {
       }
 
       const seenUrls = new Set();
+      let created = 0;
+      let retired = 0;
       for (const tabUrl of Object.keys(live.tabs ?? {})) {
         const info = live.tabs[tabUrl];
         if (!info || typeof info !== "object") continue;
         const key = normalizeUrl(tabUrl);
         if (!key || !Number.isFinite(info.count) || info.count < 1) continue;
+        if (!record.tabs[key]) created += 1;
         seenUrls.add(key);
         changed = this.#mergeLiveTab(record, key, info) || changed;
       }
 
       for (const key of Object.keys(record.tabs)) {
         if (seenUrls.has(key)) continue;
+        if (record.tabs[key]?.liveCount > 0) retired += 1;
         changed = this.#retireTab(record, key) || changed;
+      }
+      if (created || retired) {
+        dbg("store", "apply", { group: name, created, retired, rows: Object.keys(record.tabs).length });
       }
     }
 
@@ -474,6 +483,7 @@ export class GroupStore {
    *  s=1 เพิ่ม (v3.1): แท็บถูกสร้างมาแบบ "หลับ" — mirror ไม่นับเป็นตื่นใน liveMap จนกว่าผู้ใช้กดตื่นเอง */
   markRestoredTabs(tabIds) {
     if (!this.#schema || !Array.isArray(tabIds)) return;
+    dbg("store", "markRestored", { ids: tabIds });
     let changed = false;
     for (const tabId of tabIds) {
       const id = String(tabId);
@@ -499,6 +509,7 @@ export class GroupStore {
       const record = this.#schema.groups[g];
       const row = record?.tabs[k];
       if (!row || row.liveCount !== 0) continue;
+      dbg("store", "delete", { group: g, key: k });
       delete record.tabs[k];
       record.updatedAt = this.#now();
       changed = true;
@@ -542,6 +553,7 @@ export class GroupStore {
       if (others <= 0) {
         delete record.tabs[fromKey];
       }
+      dbg("store", "move", { group: g, from: fromKey, to: toKey, othersKept: others > 0 });
       record.updatedAt = this.#now();
       changed = true;
     }

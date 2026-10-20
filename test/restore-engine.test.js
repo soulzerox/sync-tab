@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { RestoreEngine } from "../background/restore-engine.js";
 import { GroupStore } from "../background/group-store.js";
 import { createFakeChrome } from "./helpers/fake-chrome.js";
+import { getLogs, clearLogs } from "../background/debug-log.js";
 
 /** ปลูก store ที่มี idle records สำเร็จรูป */
 async function storeWithIdleRecords(chrome, name, urls, color = "blue") {
@@ -323,39 +324,44 @@ test("เบราว์เซอร์คืนแท็บมาแบบไ�
   assert.equal(tab.discarded, true);
 });
 
-test("v3.2: Edge ยิง {status:'loading'} ก่อน URL เข้า → ยังไม่ถือว่า commit (กัน discard ก่อนโหลด = แท็บว่าง Untitled)", async () => {
+test("v3.3: commit จริง = title event (loading/url มาก่อนเสมอ — ถ้านับผิด discard ยกเลิกโหลด = Untitled)", async () => {
   const chrome = harness({ windows: [{ id: 101, focused: true }] });
   const store = await storeWithIdleRecords(chrome, "งาน A", ["https://a.example/1"]);
   const engine = new RestoreEngine({ chrome, store, sleep: async () => {}, commitTimeoutMs: 200 });
 
-  // จำลอง Edge จริง: create → {status:"loading"} (ไม่มี url) → commit ช้ากว่านั้น {url}
-  const realCreate = chrome.tabs.create;
-  chrome.tabs.create = async props => {
-    const created = await realCreate(props);
-    const t = chrome.tabs.get ? null : null;
-    for (const fn of [...chrome.listeners.tabs.onUpdated]) {
-      fn(created.id, { status: "loading" }, { ...created, url: "", pendingUrl: props.url });
-    }
-    globalThis.setTimeout(() => {
-      for (const fn of [...chrome.listeners.tabs.onUpdated]) {
-        fn(created.id, { status: "loading", url: props.url }, { ...created, url: props.url, pendingUrl: props.url });
-      }
-    }, 30);
-    return created;
-  };
-
+  // fake create ยิงลำดับ Edge จริง (loading → loading+url → title → complete) — engine ต้องรอ "title"
+  // แล้วค่อย discard: แท็บหลับจะมี URL และ title จริง (ไม่ใช่กล่องว่าง Untitled)
   const result = await engine.openTabs({ name: "งาน A" });
   assert.equal(result.ok, true);
   assert.equal(result.opened, 1);
 
-  const discarded = chrome.__ops.find(o => o.fn === "tabs.discard");
-  assert.ok(discarded, "ต้อง discard หลัง URL เข้า");
-  // URL ต้องเข้าก่อน discard — ถ้า discard ก่อน commit แท็บจะว่าง ("Untitled")
-  const tabId = discarded.args?.tabId ?? discarded.args?.id;
-  const tab = await chrome.tabs.get(tabId);
-  assert.ok(tab, "ต้องมีแท็บ");
+  const discardOp = chrome.__ops.find(o => o.fn === "tabs.discard");
+  assert.ok(discardOp, "discard หลัง commit");
+  const tab = await chrome.tabs.get(discardOp.args.tabId);
   assert.equal(tab.discarded, true, "แท็บหลับหลัง discard");
-  assert.equal(tab.url || tab.pendingUrl, "https://a.example/1", "แท็บต้องมี URL ไม่ใช่หน้าว่าง");
+  assert.equal(tab.url, "https://a.example/1", "แท็บมี URL จริง");
+  assert.equal(tab.title, "https://a.example/1", "title ถูกตั้งก่อน discard — แถบแท็บไม่โชว์ Untitled");
+
+  // log ต้องเห็นว่า commit สัญญาณจริงคือ title (ไม่ใช่ loading/url/timeout)
+  // "title" = ได้ตอนรอ, "seen" = title มาก่อน waitForCommit (fake ยิง sync ระหว่าง create) — ทั้งคู่คือ event title/complete
+  const done = getLogs().find(e => e.scope === "restore" && e.msg === "tab:done");
+  assert.ok(done, "tab:done ถูกบันทึก");
+  assert.ok(["title", "seen"].includes(done.data.commit), `สัญญาณ commit = title/complete (ไม่ใช่ ${done.data.commit})`);
+});
+
+test("debug log: restore flow บันทึกขั้นตอนครบทุก step", async () => {
+  clearLogs();
+  const chrome = harness({ windows: [{ id: 101, focused: true }] });
+  const store = await storeWithIdleRecords(chrome, "งาน A", ["https://a.example/1"]);
+  const engine = new RestoreEngine({ chrome, store, sleep: async () => {} });
+
+  const result = await engine.openTabs({ name: "งาน A" });
+  assert.equal(result.ok, true);
+
+  const msgs = getLogs().filter(e => e.scope === "restore").map(e => e.msg);
+  for (const m of ["openTabs:start", "target-window", "plan", "tab:create", "tab:done", "openTabs:done"]) {
+    assert.ok(msgs.includes(m), `มี log step: ${m} (ไม่งั้นวินิจฉัย flow ไม่ได้)`);
+  }
 });
 
 test("ไม่เห็นสัญญาณ navigation เลย → timeout แล้ว discard ต่อ (restore ไม่ค้างกับหน้าโหลดช้า)", async () => {

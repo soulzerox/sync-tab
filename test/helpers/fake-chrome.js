@@ -71,22 +71,24 @@ export function createFakeChrome(seed = {}) {
         };
         tabs.set(id, tab);
         ops.push({ fn: "tabs.create", args: { ...createProperties } });
-        // Edge จริงยิง onUpdated {status:"loading"} ก่อน URL commit — ใครนับเป็น "commit" เร็วเกินจะ discard ทันที
-        // (แท็บว่าง "Untitled") — commit จริงคือ event ที่มี changeInfo.url
+        // ลำดับ event แบบ Edge จริง (sync เพื่อให้เทส deterministic):
+        // 1) loading ไม่มี url (Edge ยิงแบบนี้ก่อน — ถ้านับเป็น commit = discard ยกเลิกโหลด = แท็บว่าง Untitled)
+        // 2) loading + url (navigation เริ่ม) 3) title (document title ตั้งแล้ว — strip ไม่ Untitled) 4) complete
         for (const fn of listeners.tabs.onUpdated) {
           fn(id, { status: "loading" }, { ...tab });
         }
-        // commit จริง (Edge ส่ง changeInfo.url เมื่อ navigation เริ่ม) — หน่วงเล็กน้อยให้เหมือนของจริง
         if (tab.pendingUrl) {
-          globalThis.setTimeout(() => {
-            const t = tabs.get(id);
-            if (!t || t.discarded) return;
-            t.url = t.pendingUrl;
-            t.status = "complete";
-            for (const fn of listeners.tabs.onUpdated) {
-              fn(id, { status: "loading", url: t.url }, { ...t });
-            }
-          }, 0);
+          tab.url = tab.pendingUrl;
+          for (const fn of listeners.tabs.onUpdated) {
+            fn(id, { status: "loading", url: tab.url }, { ...tab });
+          }
+          for (const fn of listeners.tabs.onUpdated) {
+            fn(id, { title: tab.title }, { ...tab });
+          }
+          tab.status = "complete";
+          for (const fn of listeners.tabs.onUpdated) {
+            fn(id, { status: "complete" }, { ...tab });
+          }
         }
         return { ...tab };
       },

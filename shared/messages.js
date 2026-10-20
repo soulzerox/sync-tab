@@ -10,7 +10,8 @@ export const MSG = Object.freeze({
   DELETE_TAB: "DELETE_TAB",
   DELETE_TABS: "DELETE_TABS",
   RENAME_GROUP: "RENAME_GROUP",
-  SET_THEME: "SET_THEME"
+  SET_THEME: "SET_THEME",
+  GET_DEBUG_LOGS: "GET_DEBUG_LOGS"
 });
 
 export const THEME_VALUES = Object.freeze({ DARK: "dark", LIGHT: "light", AUTO: "auto" });

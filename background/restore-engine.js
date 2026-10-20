@@ -14,6 +14,7 @@
 
 import { TIMINGS } from "../shared/constants.js";
 import { normalizeUrl, isIgnoredUrl } from "./url-sanitizer.js";
+import { dbg } from "./debug-log.js";
 
 const TAB_ID_NONE = -1;
 
@@ -61,15 +62,26 @@ export class RestoreEngine {
    *                  | {ok: false, error: string}>}
    */
   async openTabs({ name, urls }) {
-    if (!this.#store.getGroups()[name]) return { ok: false, error: "no-record" };
-    if (this.#busyNames.has(name)) return { ok: false, error: "busy" };
+    if (!this.#store.getGroups()[name]) {
+      dbg("restore", "reject:no-record", { name });
+      return { ok: false, error: "no-record" };
+    }
+    if (this.#busyNames.has(name)) {
+      dbg("restore", "reject:busy", { name });
+      return { ok: false, error: "busy" };
+    }
+    dbg("restore", "openTabs:start", { name, selected: Array.isArray(urls) ? urls.length : "all" });
     this.#busyNames.add(name);
     const createdIds = []; // v3.1 — แท็บที่ restore สร้างจริง (mark ใน finally แม้ window หลุดกลางทาง)
 
     try {
       const target = await this.#pickTargetWindow();
-      if (!target) return { ok: false, error: "no-window" };
+      if (!target) {
+        dbg("restore", "reject:no-window", {});
+        return { ok: false, error: "no-window" };
+      }
       const { windowId, createdWindow } = target;
+      dbg("restore", "target-window", { windowId, createdWindow });
 
       // L11 — ตัด URL ที่เปิดอยู่แล้วในหน้าต่างเป้าหมาย (ไม่ใช่เฉพาะในกลุ่ม)
       const windowTabs = await this.#chrome.tabs.query({ windowId });
@@ -84,9 +96,11 @@ export class RestoreEngine {
       const groupsInWindow = (await this.#chrome.tabGroups.query({ windowId })) ?? [];
       const existingGroup = groupsInWindow.find(g => (g.title ?? "").trim() === name);
       let groupId = existingGroup?.id ?? null;
+      dbg("restore", "group-resolve", { groupId, existing: Boolean(existingGroup) });
 
       const record = this.#store.getGroups()[name];
       const plan = this.#planTargets(record, urls, openUrls);
+      dbg("restore", "plan", { tabs: plan.map(t => t.url), skipped: this.#lastSkipped, openInWindow: openUrls.size });
       let opened = 0;
 
       for (const [index, entry] of plan.entries()) {
@@ -101,6 +115,7 @@ export class RestoreEngine {
 
         // create → (ยืนยัน URL บนแท็บ) → group → (ตั้งชื่อ/สีเฉพาะกลุ่มใหม่) → รอ commit → discard (ทุกแท็บ รวมแท็บแรก)
         const sinceTick = this.#updatedTick;
+        const t0 = Date.now();
         const created = await this.#chrome.tabs.create({
           windowId,
           url: entry.url,
@@ -108,6 +123,7 @@ export class RestoreEngine {
           pinned: false
         });
         createdIds.push(created.id);
+        dbg("restore", "tab:create", { id: created.id, url: entry.url, gotUrl: created.url || "", gotPending: created.pendingUrl || "" });
         // mark ทันทีต่อแท็บ (ธง restoredTabIds/s ใน binding ต้องพร้อมก่อน event ของแท็บนี้ถูกประมวลผล)
         // — ใน finally ยัง mark รวมทั้งชุดอีกรอบ idempotent สำหรับกรณี flow ขาดกลางทาง
         this.#store.markRestoredTabs([created.id]);
@@ -116,29 +132,40 @@ export class RestoreEngine {
         if (groupId === null) {
           groupId = await this.#chrome.tabs.group({ tabIds: [created.id], createProperties: { windowId } });
           await this.#chrome.tabGroups.update(groupId, { title: name, color: record.color });
+          dbg("restore", "tab:group-new", { id: created.id, groupId });
         } else {
           await this.#chrome.tabs.group({ tabIds: [created.id], groupId });
         }
 
-        // กันแท็บว่าง "Untitled" — discard ตอน navigation ยังไม่เริ่ม = ยกเลิกการโหลด
-        // (เห็น onUpdated ของแท็บนี้ตั้งแต่ก่อน create แล้ว → คืนทันที ไม่รอจริง)
-        await this.#waitForCommit(created.id, sinceTick);
-        await this.#chrome.tabs.discard(created.id);
+        // กันแท็บว่าง "Untitled" — commit จริงคือ title ถูกตั้ง/โหลดเสร็จ (ดู #ensureCommitListener)
+        const commit = await this.#waitForCommit(created.id, sinceTick);
+        const discardResult = await this.#chrome.tabs.discard(created.id);
 
         // ตรวจซ้ำหลัง discard: ถ้าเบราว์เซอร์ทำ URL หลุด (ไม่มี url/pendingUrl ทั้งคู่) — ตั้งกลับให้เป็นแผนสุดท้าย
+        let urlRestored = false;
         try {
           const finalTab = await this.#chrome.tabs.get(created.id);
           // v3.2 — ตรวจทั้ง url และ pendingUrl (Edge อาจมีแค่อันเดียวตอนนั้น)
           if (finalTab && isIgnoredUrl(finalTab.url || "") && isIgnoredUrl(finalTab.pendingUrl || "")) {
             await this.#chrome.tabs.update(created.id, { url: entry.url });
+            urlRestored = true;
           }
-        } catch { /* แท็บหายไปแล้ว — ไม่มีอะไรจะกู้ */ }
+          dbg("restore", "tab:done", {
+            id: created.id, url: entry.url, commit, waitMs: Date.now() - t0,
+            discardResult, urlRestored, finalUrl: finalTab?.url || "", finalPending: finalTab?.pendingUrl || "",
+            discarded: Boolean(finalTab?.discarded), status: finalTab?.status
+          });
+        } catch (err) {
+          dbg("restore", "tab:gone", { id: created.id, error: String(err?.message ?? err) }); // แท็บหายไปแล้ว — ไม่มีอะไรจะกู้
+        }
 
         opened += 1;
       }
 
+      dbg("restore", "openTabs:done", { ok: true, opened, skipped: this.#lastSkipped + (plan.length - opened), createdWindow });
       return { ok: true, opened, skipped: this.#lastSkipped + (plan.length - opened), createdWindow };
     } catch (err) {
+      dbg("restore", "openTabs:error", { error: err?.message ? String(err.message).slice(0, 120) : "restore-failed" });
       return { ok: false, error: err?.message ? String(err.message).slice(0, 120) : "restore-failed" };
     } finally {
       this.#busyNames.delete(name);
@@ -184,6 +211,7 @@ export class RestoreEngine {
       // ถ้าอันไหนอันหนึ่งว่าง/privileged แปลว่าแท็บยังไม่มี URL จริง → ตั้งให้แน่นอน
       const gotUrl = String(created.url || created.pendingUrl || "");
       if (isIgnoredUrl(gotUrl)) {
+        dbg("restore", "tab:fix-url", { id: created.id, gotUrl, url });
         await this.#chrome.tabs.update(created.id, { url });
       }
     } catch { /* update ล้มเหลว — flow เดิมยังพยายาม discard/ตรวจซ้ำ */ }
@@ -195,38 +223,44 @@ export class RestoreEngine {
     this.#commitArmed = true;
     this.#chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       if (!changeInfo) return;
-      // v3.2 — "commit" = URL ปรากฏจริงใน changeInfo (Edge ส่ง {status:"loading"} ก่อน URL เข้า
-      // ถ้านับ event ใด ๆ เป็น commit → discard ทันทีก่อน navigation เริ่ม → แท็บว่าง "Untitled")
-      if (changeInfo.url === undefined) return;
+      // v3.3 — "commit" จริง = title ถูกตั้ง (แท็บ strip ไม่แสดง "Untitled") หรือโหลดเสร็จ (status complete)
+      // changeInfo.url / {status:"loading"} มาถึงก่อนเสมอ — นับผิด = discard ยกเลิกโหลดกลางทาง = แท็บว่าง/Untitled
+      const signal = changeInfo.title !== undefined ? "title"
+        : changeInfo.status === "complete" ? "complete"
+        : null;
+      if (!signal) return;
       this.#updatedTick += 1;
       this.#commitSeen.set(String(tabId), this.#updatedTick);
       const waiters = this.#commitWaiters.get(tabId);
       if (waiters) {
         this.#commitWaiters.delete(tabId);
-        for (const settle of waiters) settle(); // URL เข้าแล้ว — discard ได้โดยไม่ง้อ timeout
+        for (const settle of waiters) settle(signal); // title/complete มาแล้ว — discard ได้โดยไม่ง้อ timeout
       }
     });
   }
 
   /**
-   * รอ navigation ของแท็บเริ่มจริง (เห็น onUpdated ตั้งแต่ sinceTick เป็นต้นไป)
-   * timeout คืน false — caller จะ discard ตามแผนเดิม (ไม่บล็อก restore นานเกิน)
+   * รอ commit จริงของแท็บ (title ถูกตั้ง หรือ status complete — เห็น onUpdated ตั้งแต่ sinceTick เป็นต้นไป)
+   * คืน signal ที่พบ หรือ "timeout"/"seen"; caller ใช้ log ต่อ
    */
   async #waitForCommit(tabId, sinceTick = -1) {
     this.#ensureCommitListener();
     const seen = this.#commitSeen.get(String(tabId));
-    if (seen !== undefined && seen >= sinceTick) return true;
+    if (seen !== undefined && seen >= sinceTick) return "seen";
     return new Promise(resolve => {
       const list = this.#commitWaiters.get(tabId) ?? new Set();
-      const waiter = () => {
+      const waiter = signal => {
         const cur = this.#commitWaiters.get(tabId);
         if (cur) { cur.delete(waiter); }
-        resolve(true);
+        resolve(signal);
       };
       list.add(waiter);
       this.#commitWaiters.set(tabId, list);
       globalThis.setTimeout(() => {
-        if (this.#commitWaiters.get(tabId)?.delete(waiter)) resolve(false);
+        if (this.#commitWaiters.get(tabId)?.delete(waiter)) {
+          dbg("restore", "commit:timeout", { tabId, ms: this.#commitTimeoutMs }); // หน้าช้า/ไม่ตั้ง title — fallback discard
+          resolve("timeout");
+        }
       }, this.#commitTimeoutMs);
     });
   }

@@ -25,11 +25,12 @@ export const TIMINGS = {
   /** เว้นจังหวะระหว่างแท็บที่ restore (create → group → setColor → discard) */
   STAGGER_MS: 120,
   /**
-   * รอสัญญาณ navigation เริ่ม (tabs.onUpdated) ก่อน discard สูงสุดกี่ ms:
-   * discard ก่อน commit จะยกเลิกการโหลด → แท็บกลายเป็นกล่องว่าง "Untitled" ไม่มี URL
+   * รอ commit จริง (title ถูกตั้ง / status complete) สูงสุดกี่ ms ก่อน discard:
+   * - changeInfo.url / {status:"loading"} มาก่อนเสมอ — นับผิด = discard ยกเลิกโหลดกลางทาง = แท็บว่าง/Untitled
+   * - หน้าช้าไม่ตั้ง title ภายในนี้ → fallback discard (ยอมเสี่ยงบางหน้า)
    * (timeout นี้เป็น fallback — ได้ event ก่อนแล้วคืนทันที)
    */
-  RESTORE_COMMIT_MS: 350,
+  RESTORE_COMMIT_MS: 1000,
   /** batch เขียน chrome.storage.local ต่อ event burst */
   SAVE_BATCH_MS: 80
 };

@@ -11,6 +11,12 @@ import { GroupStore } from "./group-store.js";
 import { BrowserMirror } from "./browser-mirror.js";
 import { RestoreEngine } from "./restore-engine.js";
 import { SyncBackup } from "./sync-backup.js";
+import { dbg, enableConsole, getLogs } from "./debug-log.js";
+
+// debug log รายละเอียดทุกขั้น (restore/mirror/store) — อ่านจาก SW devtools: __syncTabLogs.getLogs()
+// หรือ RPC GET_DEBUG_LOGS; console.debug เปิดค่าเริ่มต้นระหว่างกำลัง debug (ปิดเมื่อเสถียร)
+enableConsole(true);
+globalThis.__syncTabLogs = { getLogs }; // SW devtools console
 
 const API = self.chrome;
 
@@ -23,6 +29,7 @@ const restore = new RestoreEngine({ chrome: API, store });
 // ลงทะเบียน event listeners ทันที (กฎ MV3: sync ระหว่าง first tick ของ SW)
 // attach() จะเรียก reconcile() ตามหลัง (ครอบ startup ทุกเคส: install/update/wake)
 mirror.attach();
+dbg("sw", "boot", { at: Date.now() });
 
 // init รอบเดียวต่อ SW lifetime — onMessage ตัวไหนมาก่อนก็รอ waiter นี้ (กัน init ซ้อนกัน)
 const initWaiter = store.init()
@@ -78,9 +85,16 @@ async function handleMessage(msg) {
       await ensureStoreReady();
       const { groupName, urls } = msg.payload ?? {};
       if (typeof groupName !== "string" || !Array.isArray(urls)) return { ok: false, error: "bad-payload" };
+      dbg("sw", "rpc:OPEN_TABS", { groupName, urls });
       const result = await restore.openTabs({ name: groupName, urls });
+      dbg("sw", "rpc:OPEN_TABS:done", result);
       if (result.ok) scheduleScanAfterRestore(); // ให้ mirror จับแท็บที่เพิ่ง restore ชัวร์ (แม้ event มายังไม่ครบ)
       return { ...result, type: MSG.OPEN_TABS };
+    }
+
+    case MSG.GET_DEBUG_LOGS: {
+      // อ่านร่องรอยจาก SW devtools ไม่ได้ — popup devtools ดึงผ่าน RPC นี้
+      return { ok: true, logs: getLogs() };
     }
 
     case MSG.DELETE_GROUP: {
