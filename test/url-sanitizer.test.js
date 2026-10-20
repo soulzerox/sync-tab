@@ -37,3 +37,21 @@ test("isIgnoredUrl: URL เข้าระบบ/ privileged (L1) — edge://* �
   assert.equal(isIgnoredUrl("about:blank"), true);
   assert.equal(isIgnoredUrl("https://ok.example/page"), false);
 });
+
+test("normalizeUrl (v3.1): ตัด tracking params — __cf_chl*, utm_*, fbclid ฯลฯ Token ต่างกันถือเป็นหน้าเดียวกัน", () => {
+  assert.equal(
+    normalizeUrl("https://twkan.com/book/68028.html?__cf_chl_rt_tk=AAA-111zz"),
+    "https://twkan.com/book/68028.html"
+  );
+  assert.equal(
+    normalizeUrl("https://site.com/p?utm_source=x&utm_medium=y&page=2"),
+    "https://site.com/p?page=2",
+    "param ธุรกิจจริง (page=2) ถูกคงไว้"
+  );
+  assert.equal(normalizeUrl("https://s.com/?fbclid=zz"), "https://s.com");
+  assert.equal(
+    normalizeUrl("https://s.com/a?__cf_chl_tk=1") === normalizeUrl("https://s.com/a?__cf_chl_tk=2"),
+    true,
+    "หน้าเดียวกัน ต่างเทียบ Token → key เดียว"
+  );
+});

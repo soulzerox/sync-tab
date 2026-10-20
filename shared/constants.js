@@ -61,10 +61,22 @@ export const IGNORED_URL_PREFIXES = Object.freeze([
 ]);
 
 /**
- * v3 ไม่ตัด tracking params เป็น feature (ระบบเก่าถอด setting นี้)
- * แต่คง export ไว้เพื่อให้ normalizeUrl(url, false) ยังประพฤติเหมือนเดิม
+ * v3.1 — ตัด query-param ที่เปลี่ยนทุกเที่ยว/ทำหน้าซ้ำออกก่อนจับคู่ record:
+ * `__cf_chl*` (Cloudflare challenge token ต่างกันทุกเซสชัน), `utm_*`, และ click-ids ทั่วไป
+ * หน้าเดียวกันแต่ token ต่างกันจะถือเป็น normalized URL เดียวกัน (จบปัญหา record ซ้ำ)
+ * (คง signature normalizeUrl(url, false) ไว้เหมือนเดิม)
  */
-export const TRACKING_PARAM_PREFIXES = Object.freeze([]);
+export const TRACKING_PARAM_PREFIXES = Object.freeze([
+  "__cf_chl",
+  "utm_",
+  "fbclid",
+  "gclid",
+  "msclkid",
+  "twclid",
+  "igshid",
+  "mc_eid",
+  "yclid"
+]);
 
 /** ทิศทางธีม popup (บันทึกใน schema.themepreference) */
 export const THEME_PREFERENCES = Object.freeze(["dark", "light", "auto"]);

@@ -40,6 +40,39 @@ function toast(text, { warn = false, ms = 2500 } = {}) {
   }, ms);
 }
 
+// ---------- confirm dialog ใน popup (window.confirm ใน popup จะถูก popup ตัดขอบจนมองไม่เห็น) ----------
+const confirmHost = $("#confirm-host");
+const confirmTitleEl = $("#confirm-title");
+const confirmDetailEl = $("#confirm-detail");
+const confirmOkEl = $("#confirm-ok");
+const confirmCancelEl = $("#confirm-cancel");
+let confirmResolve = null;
+
+function confirmModal(title, detail, { okLabel = "ยืนยัน" } = {}) {
+  confirmTitleEl.textContent = title;
+  confirmDetailEl.textContent = detail ?? "";
+  confirmOkEl.textContent = okLabel;
+  confirmHost.hidden = false;
+  confirmOkEl.focus();
+  return new Promise(resolve => { confirmResolve = resolve; });
+}
+
+function settleConfirm(value) {
+  if (!confirmResolve) return;
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  confirmHost.hidden = true;
+  resolve(value);
+}
+
+confirmOkEl.addEventListener("click", () => settleConfirm(true));
+confirmCancelEl.addEventListener("click", () => settleConfirm(false));
+confirmHost.querySelector(".modal-backdrop").addEventListener("click", () => settleConfirm(false));
+window.addEventListener("keydown", event => {
+  if (!confirmResolve) return;
+  if (event.key === "Escape") { event.preventDefault(); settleConfirm(false); }
+});
+
 // escape ตัวหนังสือของผู้ใช้ทุกตำแหน่ง (title อาจมี <script> ปลอมจากหน้าเว็บก็ได้)
 function esc(text) {
   const div = document.createElement("div");
@@ -342,7 +375,7 @@ async function openTabs(groupName, urls) {
 async function deleteGroup(groupName, isLive) {
   const record = state.groups[groupName];
   const tabsCount = record ? Object.keys(record.tabs).length : 0;
-  const ok = window.confirm(groupDeleteConfirmMessage(groupName, tabsCount, isLive));
+  const ok = await confirmModal("ลบกลุ่มจากคลัง?", groupDeleteConfirmMessage(groupName, tabsCount, isLive), { okLabel: "ลบกลุ่ม" });
   if (!ok) return;
   const response = await send({ type: MSG.DELETE_GROUP, payload: { groupName } });
   if (!response?.ok) { toast(`ลบไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true }); return; }
@@ -366,7 +399,11 @@ async function deleteTab(groupName, url, title) {
 /** ลบแท็บที่จำไว้หลายรายการที่ tick ไว้ (IDLE เท่านั้น — แท็บตื่นไม่ถูกเลือกได้อยู่แล้ว) */
 async function deleteTabsSelected(groupName, urls) {
   if (urls.length === 0) return;
-  const ok = window.confirm(`ลบแท็บที่จำไว้ ${urls.length} รายการออกจากคลัง "${groupName}"?\n(แท็บบนเบราว์เซอร์ไม่ถูกแตะ)`);
+  const ok = await confirmModal(
+    `ลบแท็บที่จำไว้ ${urls.length} รายการ?`,
+    `ออกจากคลัง "${groupName}" — แท็บบนเบราว์เซอร์ไม่ถูกแตะ`,
+    { okLabel: "ลบ" }
+  );
   if (!ok) return;
   const response = await send({ type: MSG.DELETE_TABS, payload: { groupName, urls } });
   if (!response?.ok) { toast(`ลบไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true }); return; }
