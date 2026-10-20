@@ -6,8 +6,9 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 - `manifest.json` — MV3 manifest, permissions: `tabs`, `tabGroups`, `storage`, `unlimitedStorage`
 - `background/service-worker.js` — wires chrome listeners synchronously (mirror), message router for the 7 RPC types
 - `background/browser-mirror.js` — chrome events → in-memory registries → liveMap → GroupStore
-- `background/group-store.js` — the single state seam (storage projection, schema v3, debounced persist + `flush()`)
-- `background/restore-engine.js` — restore flow: diff → create → group → setColor → discard, staggered + mutex
+- `background/group-store.js` — the single state seam (storage projection, schema v3, debounced persist + `flush()`; backup hook + `consumeRestoredSyncNotice()`)
+- `background/restore-engine.js` — restore flow: diff → create → ensure-URL → group → setColor → wait-commit → discard, staggered + mutex
+- `background/sync-backup.js` — เงาสำรองคลังไป `chrome.storage.sync` (compact + chunk ≤6800, throttle 5 นาที, กู้เฉพาะ local ว่างจริง)
 - `background/url-sanitizer.js` — URL filtering/normalizing; v3.1 strips `#hash` + tracking params (`TRACKING_PARAM_PREFIXES`: `__cf_chl`, `utm_`, `fbclid`, `gclid`, …) as the record dedupe base
 - `popup/` — popup UI (html/css/js; tokens in `design-system/synctab/pages/popup.md`)
 - `shared/` — `constants.js` (schema/keys/timings), `messages.js` (MSG RPC + theme values), `types.js` (JSDoc), `ui-utils.js` (pure popup helpers)

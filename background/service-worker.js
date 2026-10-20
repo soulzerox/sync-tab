@@ -10,10 +10,13 @@ import { MSG } from "../shared/messages.js";
 import { GroupStore } from "./group-store.js";
 import { BrowserMirror } from "./browser-mirror.js";
 import { RestoreEngine } from "./restore-engine.js";
+import { SyncBackup } from "./sync-backup.js";
 
 const API = self.chrome;
 
-const store = new GroupStore({ storage: API.storage.local });
+// เงาสำรองไป storage.sync (ผูกบัญชี) — รอดถอด extension/ล้าง profile/เครื่องใหม่
+const syncBackup = new SyncBackup({ syncStorage: API.storage.sync ?? null });
+const store = new GroupStore({ storage: API.storage.local, backup: syncBackup });
 const mirror = new BrowserMirror({ chrome: API, store });
 const restore = new RestoreEngine({ chrome: API, store });
 
@@ -66,7 +69,8 @@ async function handleMessage(msg) {
         groups: snapshot.groups,
         themePreference: snapshot.themePreference ?? "dark",
         lastScanAt: snapshot.lastScanAt ?? null,
-        showMigrationNotice: store.consumeMigrationNotice()
+        showMigrationNotice: store.consumeMigrationNotice(),
+        restoredSyncBackup: store.consumeRestoredSyncNotice()
       };
     }
 

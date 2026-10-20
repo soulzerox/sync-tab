@@ -60,16 +60,20 @@ export class GroupStore {
    * @param {number} [opts.saveDelayMs] debounce ก่อน persist (test ส่ง 0)
    * @param {typeof setTimeout} [opts.setTimeoutFn] inject เพื่อเทส (default ผ่าน globalThis — กัน Illegal invocation ใน Edge SW)
    * @param {typeof clearTimeout} [opts.clearTimeoutFn]
+   * @param {import("./sync-backup.js").SyncBackup | null} [opts.backup]
+   *        เงาสำรอง sync (ไม่ส่ง → ปิดฟีเจอร์กู้ข้ามเครื่อง — เทสเก่าทำงานเหมือนเดิม)
    */
-  constructor({ storage, now = Date.now, saveDelayMs = TIMINGS.SAVE_BATCH_MS, setTimeoutFn = (fn, ms) => globalThis.setTimeout(fn, ms), clearTimeoutFn = id => globalThis.clearTimeout(id) }) {
+  constructor({ storage, now = Date.now, saveDelayMs = TIMINGS.SAVE_BATCH_MS, setTimeoutFn = (fn, ms) => globalThis.setTimeout(fn, ms), clearTimeoutFn = id => globalThis.clearTimeout(id), backup = null }) {
     this.#storage = storage;
     this.#now = now;
     this.#saveDelayMs = saveDelayMs;
     this.#setTimeoutFn = setTimeoutFn;
     this.#clearTimeoutFn = clearTimeoutFn;
+    this.#backup = backup;
   }
 
   #storage;
+  #backup;
   #now;
   #saveDelayMs;
   #setTimeoutFn;
@@ -97,6 +101,18 @@ export class GroupStore {
       this.#renormalizeStoredTabs();
       // v3.1 — ฟิลด์ live-binding tracking (backward-compatible — ไม่ bump schema version)
       if (this.#ensureTrackingFields()) this.#scheduleSave();
+    } else if (!existing && !hasLegacy && this.#backup) {
+      // เครื่องใหม่ / ถอด extension แล้วติดตั้งใหม่ (local ว่างจริง — ไม่ใช่ v2 → wipe):
+      // กู้จากเงาสำรอง sync ก่อน ไม่ทิ้งข้อมูลผู้ใช้; ไม่มีเงาสำรองก็เริ่มคลังเปล่าตามเดิม
+      const restored = await this.#backup.read();
+      if (restored) {
+        this.#schema = { ...restored, themePreference: undefined, lastScanAt: undefined, migrationNoticeAt: undefined, migrationAckAt: undefined, restoredFromSyncAt: this.#now() };
+        await this.#storage.set({ [STORAGE_KEY]: this.#schema });
+      } else {
+        this.#schema = { version: SCHEMA_VERSION, groups: {}, themePreference: undefined, lastScanAt: undefined, migrationNoticeAt: undefined, migrationAckAt: undefined, liveTabs: {}, restoredTabIds: {} };
+        await this.#storage.clear();
+        await this.#storage.set({ [STORAGE_KEY]: this.#schema });
+      }
     } else {
       // อะไรก็ตามที่ไม่ใช่ v3 — ล้างทั้ง area แล้วสร้าง schema ใหม่ (ระบบเก่าไม่ import)
       this.#schema = { version: SCHEMA_VERSION, groups: {}, themePreference: undefined, lastScanAt: undefined, migrationNoticeAt: undefined, migrationAckAt: undefined, liveTabs: {}, restoredTabIds: {} };
@@ -568,6 +584,17 @@ export class GroupStore {
     return true;
   }
 
+  /**
+   * บอก popup ว่า init ครั้งนี้กู้คลังจากเงาสำรอง sync (toast "กู้คืน…จากบัญชี") — consume ครั้งเดียวแล้วล้างธง
+   * @returns {boolean} true เมื่อมีธง restoredFromSyncAt ให้โชว์
+   */
+  consumeRestoredSyncNotice() {
+    if (!this.#schema?.restoredFromSyncAt) return false;
+    this.#schema.restoredFromSyncAt = undefined;
+    this.#scheduleSave();
+    return true;
+  }
+
   #scheduleSave() {
     if (this.#saveTimer !== null) return; // debounce รวม event burst
     this.#pendingPersist = new Promise(resolve => {
@@ -578,6 +605,8 @@ export class GroupStore {
           // storage ล้ม: ยอมปล่อย — คลังใช้ pending schema อยู่
         }
         this.#saveTimer = null;
+        // อัปเดตเงาสำรอง sync แบบ throttled (fire-and-forget — เงาห้ามดึง persist local)
+        try { void this.#backup?.writeSoon(this.#schema); } catch { /* noop */ }
         resolve();
       };
       this.#saveTimer = this.#setTimeoutFn(run, this.#saveDelayMs);

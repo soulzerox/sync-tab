@@ -133,6 +133,9 @@ async function refresh() {
   if (state.showMigrationNotice) {
     toast("อัปเกรดเป็น Group Sync แล้ว — ข้อมูลระบบเก่า (สำรองหน้าต่าง) ถูกล้างออกแล้ว", { ms: 4000 });
   }
+  if (state.restoredSyncBackup) {
+    toast("กู้คืนกลุ่มและแท็บจากที่สำรองอัตโนมัติ (sync ของบัญชี) แล้ว", { ms: 4000 });
+  }
 }
 
 // ---------- render ----------
