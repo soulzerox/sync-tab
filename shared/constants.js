@@ -24,6 +24,12 @@ export const LEGACY_STORAGE_KEYS = Object.freeze([
 export const TIMINGS = {
   /** เว้นจังหวะระหว่างแท็บที่ restore (create → group → setColor → discard) */
   STAGGER_MS: 120,
+  /**
+   * รอสัญญาณ navigation เริ่ม (tabs.onUpdated) ก่อน discard สูงสุดกี่ ms:
+   * discard ก่อน commit จะยกเลิกการโหลด → แท็บกลายเป็นกล่องว่าง "Untitled" ไม่มี URL
+   * (timeout นี้เป็น fallback — ได้ event ก่อนแล้วคืนทันที)
+   */
+  RESTORE_COMMIT_MS: 350,
   /** batch เขียน chrome.storage.local ต่อ event burst */
   SAVE_BATCH_MS: 80
 };

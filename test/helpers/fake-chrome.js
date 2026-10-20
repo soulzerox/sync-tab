@@ -69,6 +69,10 @@ export function createFakeChrome(seed = {}) {
         };
         tabs.set(id, tab);
         ops.push({ fn: "tabs.create", args: { ...createProperties } });
+        // จำลอง Chrome/Edge จริง: navigation เริ่มตอน create — ยิง onUpdated {status:"loading"} + url ทันที
+        for (const fn of listeners.tabs.onUpdated) {
+          fn(id, { status: "loading", url: tab.url }, { ...tab });
+        }
         return { ...tab };
       },
       /** options: { tabIds, groupId } หรือ { tabIds, createProperties: { windowId } } */
@@ -118,6 +122,7 @@ export function createFakeChrome(seed = {}) {
         const t = tabs.get(tabId);
         if (!t) throw new Error(`No tab with id: ${tabId}`);
         Object.assign(t, properties);
+        ops.push({ fn: "tabs.update", args: { tabId, ...properties } });
         return { ...t };
       },
       remove: async tabIds => {
