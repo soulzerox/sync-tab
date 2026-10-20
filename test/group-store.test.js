@@ -393,3 +393,117 @@ test("deleteTabs: payload ไม่ถูกต้องหรือกลุ่
   assert.deepEqual(store.deleteTabs("w", null), { removed: 0, groupDeleted: false });
   assert.deepEqual(store.deleteTabs("no-such-group", ["https://a.com/x"]), { removed: 0, groupDeleted: false });
 });
+
+// ------------------------------------------------------------------
+// v3.1 — Live tab tracking (L13/L14): binding / origin ป้องกัน / move-follow / consume
+// ------------------------------------------------------------------
+
+test("v3.1: liveBinding roundtrip + persist ข้าม init (รอดจาก SW restart แล้วยก binding ต่อได้)", async () => {
+  const { store, storage } = createStore();
+  await store.init();
+  store.setLiveBinding(7, { groupName: "งาน", urlKey: "https://a/x" });
+  await store.flush();
+  assert.deepEqual(store.liveBinding(7), { groupName: "งาน", urlKey: "https://a/x", restored: false });
+
+  const boot2 = new GroupStore({ storage, now: () => 99, saveDelayMs: 0, setTimeoutFn: setTimeout, clearTimeoutFn: clearTimeout });
+  await boot2.init();
+  assert.deepEqual(boot2.liveBinding(7), { groupName: "งาน", urlKey: "https://a/x", restored: false });
+  assert.equal(boot2.liveBinding(999), null);
+});
+
+test("v3.1: ธง origin ป้องกันติดค้างผ่าน setLiveBinding เสมอ — mark ก่อน/หลังมี binding ได้ผลเดียวกัน", async () => {
+  const { store } = createStore();
+  await store.init();
+
+  store.markRestoredTabs([9]);                 // mark ก่อน (restore สร้างแท็บก่อน mirror register)
+  assert.equal(store.liveBinding(9), null);
+  store.setLiveBinding(9, { groupName: "w", urlKey: "https://r/x" });
+  assert.equal(store.liveBinding(9).restored, true, "ธงใน restoredTabIds ติดผ่าน binding ใหม่");
+
+  store.setLiveBinding(8, { groupName: "w", urlKey: "https://l/x" });
+  assert.equal(store.liveBinding(8).restored, false);
+  store.markRestoredTabs([8]);                 // mark หลัง (flip บน binding เดิม)
+  assert.equal(store.liveBinding(8).restored, true);
+
+  store.setLiveBinding(10, { groupName: "w", urlKey: "https://p/x" });
+  store.protectLiveBinding(10);                // แท็บที่ scan ครั้งแรกเจอ
+  assert.equal(store.liveBinding(10).restored, true);
+
+  store.setLiveBinding(11, { groupName: "w", urlKey: "https://n/x" });
+  assert.equal(store.liveBinding(11).restored, false, "แท็บธรรมดา (จับจาก event) ไม่ได้ธง — ปิดเองลบได้");
+});
+
+test("v3.1: pruneLiveBindings ตัดของแท็บที่หายไประหว่าง SW หลับ คงของที่ยังมีชีวิต", async () => {
+  const { store } = createStore();
+  await store.init();
+  store.setLiveBinding(1, { groupName: "w", urlKey: "https://a/x" });
+  store.setLiveBinding(2, { groupName: "w", urlKey: "https://b/x" });
+  store.markRestoredTabs([3]);
+
+  store.pruneLiveBindings([2, 3]);
+  assert.equal(store.liveBinding(1), null);
+  assert.ok(store.liveBinding(2));
+});
+
+test("v3.1 L13: consumeDeletedTabs ลบเมื่อ instance ตื่นหมด + GC กลุ่มว่าง; เว้นถ้ายังมี instance ตื่น", async () => {
+  const { store } = createStore();
+  await store.init();
+  store.applyLiveMap(live("งาน", { tabs: { ...liveTab("https://alone/x"), ...liveTab("https://shared/y", { count: 2 }) } }));
+  await store.flush();
+
+  // จำลอง post-rebuild: แท็บหนึ่งของ shared/y ปิด — ยังเหลืออีกตัว
+  store.applyLiveMap(live("งาน", { tabs: liveTab("https://shared/y", { count: 1 }) }));
+  store.consumeDeletedTabs([{ g: "งาน", k: "https://shared/y" }]);
+  assert.ok(store.snapshot().groups["งาน"].tabs["https://shared/y"], "ยังมี instance ตื่น — ไม่ลบ");
+
+  store.applyLiveMap({});
+  store.consumeDeletedTabs([
+    { g: "งาน", k: "https://shared/y" },
+    { g: "งาน", k: "https://alone/x" },
+    { g: "งาน", k: "https://alone/x" }   // คิวซ้ำ (จำลอง event ยิงซ้ำ) — dedupe ได้
+  ]);
+  assert.ok(!store.snapshot().groups["งาน"], "ลบครบ + GC กลุ่มว่าง (L8)");
+});
+
+test("v3.1 L14: moveLiveTabs เลื่อน record — addedAt/order เดินไปแถวใหม่ แถวเก่าลบ ไม่ทำเมื่อเก่ายังตื่น", async () => {
+  const { store } = createStore();
+  await store.init();
+  store.applyLiveMap(live("งาน", { tabs: liveTab("https://a/1", { title: "OLD", favIconUrl: "o.png" }) }));
+  store.applyLiveMap(live("งาน", { tabs: { ...liveTab("https://a/1"), ...liveTab("https://a/2", { title: "NEW", favIconUrl: "n.png" }) } }));
+  await store.flush();
+
+  const oldRow = { ...store.snapshot().groups["งาน"].tabs["https://a/1"] };
+  const newRow = { ...store.snapshot().groups["งาน"].tabs["https://a/2"] };
+  assert.ok(oldRow && newRow, "seed ครบสองแถว");
+
+  store.applyLiveMap(live("งาน", { tabs: liveTab("https://a/2") }));   // post-rebuild: ไม่มีใครตื่นบน a/1
+  store.moveLiveTabs([{ g: "งาน", fromKey: "https://a/1", toKey: "https://a/2" }]);
+  await store.flush();
+
+  const tabs = store.snapshot().groups["งาน"].tabs;
+  assert.deepEqual(Object.keys(tabs), ["https://a/2"], "แถวเก่าหาย — ไม่ค้าง idle ระทิ");
+  assert.equal(String(tabs["https://a/2"].addedAt), String(Math.min(oldRow.addedAt, newRow.addedAt)));
+  assert.equal(String(tabs["https://a/2"].order ?? 0), String(Math.min(oldRow.order ?? 0, newRow.order ?? 0)));
+});
+
+test("v3.1 L14: แถวเก่ายังมี instance ตื่น (liveCount>0) → moveLiveTabs ข้าม ไม่ย้อมแมว", async () => {
+  const { store } = createStore();
+  await store.init();
+  store.applyLiveMap(live("งาน", { tabs: { ...liveTab("https://a/1", { count: 2 }), ...liveTab("https://a/2") } }));
+  await store.flush();
+
+  store.moveLiveTabs([{ g: "งาน", fromKey: "https://a/1", toKey: "https://a/2" }]);
+  await store.flush();
+  const tabs = store.snapshot().groups["งาน"].tabs;
+  assert.ok(tabs["https://a/1"], "ยังมีผู้ใช้อยู่ — แถวเก่าไม่ถูกลบ/ย้าย");
+});
+
+test("v3.1: renameGroup เปลี่ยน binding ตามชื่อกลุ่มใหม่", async () => {
+  const { store } = createStore();
+  await store.init();
+  store.applyLiveMap(live("เก่า", { tabs: liveTab("https://a/x") }));
+  store.setLiveBinding(5, { groupName: "เก่า", urlKey: "https://a/x" });
+  store.renameGroup("เก่า", "ใหม่");
+  await store.flush();
+  assert.deepEqual(store.liveBinding(5), { groupName: "ใหม่", urlKey: "https://a/x", restored: false });
+});

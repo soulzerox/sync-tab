@@ -8,7 +8,7 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 - `background/browser-mirror.js` — chrome events → in-memory registries → liveMap → GroupStore
 - `background/group-store.js` — the single state seam (storage projection, schema v3, debounced persist + `flush()`)
 - `background/restore-engine.js` — restore flow: diff → create → group → setColor → discard, staggered + mutex
-- `background/url-sanitizer.js` — URL filtering/normalizing (kept from v2; `TRACKING_PARAM_PREFIXES` is now `[]`)
+- `background/url-sanitizer.js` — URL filtering/normalizing; v3.1 strips `#hash` + tracking params (`TRACKING_PARAM_PREFIXES`: `__cf_chl`, `utm_`, `fbclid`, `gclid`, …) as the record dedupe base
 - `popup/` — popup UI (html/css/js; tokens in `design-system/synctab/pages/popup.md`)
 - `shared/` — `constants.js` (schema/keys/timings), `messages.js` (MSG RPC + theme values), `types.js` (JSDoc), `ui-utils.js` (pure popup helpers)
 - `test/` — `node --test` suites with the shared fake-chrome harness (`test/fake-chrome.js`)
@@ -16,7 +16,8 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 - `SOT.md` / `CONTEXT.md` / `PRODUCT.md` / `docs/` — spec, glossary, product note, ADR + history
 
 ## Conventions
-- Spec source of truth: `SOT.md` (v3 sync laws L1–L12; read before touching sync behavior).
+- Spec source of truth: `SOT.md` (v3 sync laws L1–L15; read before touching sync behavior).
+- v3.1 close/navigation semantics: mirror binds `tabId ↔ record` (`store.setLiveBinding`, persisted in `liveTabs`/`restoredTabIds`). Explicit per-tab close (`isWindowClosing=false`, unprotected origin) → `store.consumeDeletedTabs` deletes the record; window close / crash-wake / restored-or-scan-first origin (`r=1`) → record sleeps (old behavior). URL change on a bound tab → `store.moveLiveTabs` moves the record (old row deleted, `addedAt`/`order` carried). These run AFTER `applyLiveMap` per burst; never write schema fields directly.
 - Popup talks to the service worker ONLY via `chrome.runtime.sendMessage` (`shared/messages.js` MSG constants) — no direct `chrome.tabs`/`chrome.storage` in popup.
 - All state mutations go through `GroupStore`; mirror is read-only over registries. Persist is debounced (80 ms) — end writes with `await store.flush()` when determinism matters.
 - Tab/group identity = exact group name (trim-able but case-sensitive window-agnostic); ungrouped tabs, unnamed groups, incognito, and privileged URLs (`edge://*`, etc.) are never tracked (L1).

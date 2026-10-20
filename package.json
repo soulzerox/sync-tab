@@ -1,6 +1,6 @@
 {
   "name": "synctab-group-sync",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Group-only tab sync for Microsoft Edge (MV3) — mirror live tab groups and restore them as sleeping (discarded) tabs",
   "type": "module",
   "scripts": {

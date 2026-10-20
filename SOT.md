@@ -62,6 +62,9 @@ export interface StorageSchema {
   themepreference?: "dark" | "light" | "auto"; // popup toggle บันทึกที่นี่
   lastScanAt?: number;   // ครั้งล่าสุดที่ full rescan / startup reconcile
   migrationNoticeAt?: number;
+  // v3.1 — live tab tracking (ไม่ bump schema version; schema เก่าถือว่า = {} อัตโนมัติ)
+  liveTabs?: Record<string, { g: string; k: string; r?: 1 }>; // tabId → {ชื่อกลุ่ม, url key, r=origin ป้องกัน}; persist รอดจาก SW restart
+  restoredTabIds?: Record<string, 1>; // ธง tabId ที่ RestoreEngine สร้าง (ปิด = ไม่ลบ record)
 }
 ```
 
@@ -72,7 +75,7 @@ export interface StorageSchema {
 | L1 | แท็บเข้าคลังได้เมื่อ: มี `groupId ≥ 1` และ group นั้นมีชื่อ (exact string — ไม่ trim, case-sensitive), URL ผ่าน sanitizer (ฟิลเตอร์ `edge://`, `chrome://` และ scheme พิเศษอื่น), และไม่อยู่ในหน้าต่าง incognito |
 | L2 | Group identity = ชื่อเป๊ะ ๆ; กรณีสองหน้าต่างเปิดกลุ่มชื่อเดียวกัน = record เดียว (tabs เป็น union; `liveCount` นับรวมทุก instance; `liveWindowIds` รู้ว่าเปิดอยู่หน้าต่างไหนบ้าง) |
 | L3 | แท็บใหม่เปิดเข้า group ที่ตรงชื่อ → create/update record ทันที (`liveCount+1`, รวม title/favicon ขณะ live) |
-| L4 | ปิดแท็บ (รายตัว, ปิดทั้ง window, ปิดทั้งกลุ่ม — รวม event `isWindowClosing`) → `liveCount-1`; ถ้ากลายเป็น 0 = สถานะ "หลับ" (`closedAt` stamp) record คงอยู่ |
+| L4 | ปิดแท็บ (รายตัว, ปิดทั้ง window, ปิดทั้งกลุ่ม — รวม event `isWindowClosing`) → `liveCount-1`; ถ้ากลายเป็น 0 = สถานะ "หลับ" (`closedAt` stamp) record คงอยู่ *(v3.1: กรณี "ปิดรายตัว" ของแท็บที่ mirror จับจาก event โดยตรง → กลายเป็นการ **ลบ record** — ดู L13)* |
 | L5 | Group object บน browser ถูกลบ (tabGroups.onRemoved จากปิดแท็บหมด/ยุบกลุ่ม) → เฉพาะแท็บของ instance นั้นหลับ; ถ้ามี instance ชื่อเดียวกันใน window อื่น กลุ่มยังคง live ผ่าน instance นั้น |
 | L6 | ลากแท็บออกจากกลุ่ม (ungroup) → แท็บพ้นขอบเขต sync = หลับทันที (tab ตัวจริงยังเปิดอยู่ก็ตาม; restore จากปุ่ม = เปิดแท็บใหม่ ไม่ผูกกับ tab เก่า) |
 | L7 | เปลี่ยนชื่อกลุ่มบน browser → rekey record (ชื่อใหม่); ถ้าชื่อใหม่มี record อยู่แล้ว → union merge; ปรับ color ตาม event ล่าสุดเสมอ |
@@ -81,6 +84,9 @@ export interface StorageSchema {
 | L10 | **ไม่เคย** เปิดแท็บเองโดยไม่มีคำสั่งจากผู้ใช้: ไม่ auto-restore, ไม่ reopen group, ไม่มี auto-open ใด ๆ; `onInstalled`/`onStartup` = reconcile สถานะเท่านั้น |
 | L11 | Restore dedupe: URL ที่กำลังเปิดอยู่ใน window เป้าหมาย (ไม่ใช่เฉพาะในกลุ่ม) จะถูกข้าม (normalized URL) |
 | L12 | การบันทึกทุกครั้งเป็นชุด (batch ต่อ event burst, ≥ 80ms) และ flush ทันที 0ms เมื่อการเปลี่ยนแปลงทิศทาง "ปิด" เพื่อกันข้อมูลหลุดเมื่อ service worker ถูก kill กลางคัน |
+| L13 | (v3.1) ผู้ใช้ปิดแท็บเองจากเบราว์เซอร์ (`tabs.onRemoved` โดย `isWindowClosing=false`) ของแท็บที่ mirror จับจาก event → **ลบ record ทันที** ("ปิดตาม") — ยกเว้น: (a) `isWindowClosing=true` = ปิดทั้ง window → หลับตาม L4 เดิม; (b) origin ป้องกัน (`r=1`: แท็บที่ RestoreEngine สร้าง หรือแท็บที่ scan ครั้งแรกเจอ — สาเหตุกำเนิดไม่แน่) → หลับแทนการลบ; (c) url ยังมี instance อื่นตื่น (`liveCount>0`) → คง record ต่อ แค่ count ลด |
+| L14 | (v3.1) แท็บที่ผูก binding เปิดหน้า/URL ใหม่ → **record เลื่อนตามแท็บ**: แถว url เดิมลบ, `addedAt`/`order` ย้ายไปแถว url ใหม่ (ผ่าน `moveLiveTabs` หลัง applyLiveMap ต่อ burst) — ยกเว้น origin ป้องกัน → กลไกเดิม (แถวเดิมหลับ ไม่ลบ); url เดิมถ้ายังมี instance อื่นตื่น → แถวเดิมคงชีวิต แค่ `liveCount` ลด |
+| L15 | (v3.1) binding `tabId ↔ {g, k, r}` persist ใน storage (`liveTabs` + `restoredTabIds`) — รอดจาก SW restart; init/reconcile ตัด binding ของแท็บที่หายไปทุกครั้ง (prune); rename กลุ่มเปลี่ยนชื่อใน binding ตาม |
 
 ---
 
@@ -118,10 +124,10 @@ flowchart TD
 
 | โมดูล | ความรับผิดชอบ | Interface (หลังเขียน) |
 |---|---|---|
-| `background/group-store.js` | คลังกลุ่ม: diff projection จาก liveMap, live/idle flips, rename rekey+union merge, deleteTab/deleteTabs (bulk; input ผ่าน normalize + dedupe) + empty-group GC (L8), init ยก key ติด fragment (#hash) ให้เป็น normalized key + merge ตัวซ้ำ (v3.0.1 dedupe), persist (debounce 80ms batch + `flush()`) | `init()`, `snapshot()`, `getGroups()`, `applyLiveMap(liveMap, {markScan})`, `renameGroup(oldName, newName)`, `deleteGroup(name)`, `deleteTab(name, url)`, `deleteTabs(name, urls)`, `setTheme(t)`, `markScan()`, `markMigrationNotice()`, `consumeMigrationNotice()`, `themePreference`, `ready`, `migrated`, `flush()` |
-| `background/browser-mirror.js` | รับ chrome event → เก็บ session registries (groupId↔{windowId,name,color}, tabId↔data) → rebuild liveMap → เรียก `applyLiveMap`; rename ระหว่าง event เรียก `store.renameGroup` ก่อน (L7), reconcile/rescan อ่านสถานะจริงทั้งชุด (ตัด incognito/unnamed/privileged) | `attach() → Promise` (ลง listeners แบบ sync + reconcile), `reconcile()`, `handle{TabCreated,TabUpdated,TabRemoved,TabAttached,TabDetached,GroupCreated,GroupUpdated,GroupRemoved,WindowRemoved}(...)`, `flushSync()` |
-| `background/restore-engine.js` | opener: หา window เป้าหมาย + existing live group; diff ตาม L11; create → group → update(color เฉพาะกลุ่มใหม่) → discard แบบ staggered (120ms) + per-name mutex + เช็ค window ยังอยู่หลังทุก sleep | `openTabs({name, urls}) → {ok, opened, skipped, createdWindow} \| {ok:false, error}` |
-| `background/url-sanitizer.js` | (คงเดิมจาก v2) normalize URL, ตัดพารามิเตอร์เชิงทำงาน, filter privileged scheme | คงเดิม |
+| `background/group-store.js` | คลังกลุ่ม: diff projection จาก liveMap, live/idle flips, rename rekey+union merge, deleteTab/deleteTabs (bulk; input ผ่าน normalize + dedupe) + empty-group GC (L8), init ยก key ติด fragment (#hash) ให้เป็น normalized key + merge ตัวซ้ำ (v3.0.1 dedupe), **live tab tracking (v3.1 L13–L15): binding tabId↔record persist, mark restored/protect origin, moveLiveTabs (record เลื่อนตาม), consumeDeletedTabs (ปิดเอง = ลบ)**, persist (debounce 80ms batch + `flush()`) | `init()`, `snapshot()`, `getGroups()`, `applyLiveMap(liveMap, {markScan})`, `renameGroup(oldName, newName)`, `deleteGroup(name)`, `deleteTab(name, url)`, `deleteTabs(name, urls)`, `liveBinding(tabId)`, `setLiveBinding(tabId, {groupName, urlKey})`, `protectLiveBinding(tabId)`, `clearLiveBinding(tabId)`, `pruneLiveBindings(aliveTabIds)`, `markRestoredTabs(tabIds)`, `moveLiveTabs(moves)`, `consumeDeletedTabs(deletes)`, `setTheme(t)`, `markScan()`, `markMigrationNotice()`, `consumeMigrationNotice()`, `themePreference`, `ready`, `migrated`, `flush()` |
+| `background/browser-mirror.js` | รับ chrome event → เก็บ session registries (groupId↔{windowId,name,color}, tabId↔data) → rebuild liveMap → เรียก `applyLiveMap`; rename ระหว่าง event เรียก `store.renameGroup` ก่อน (L7), reconcile/rescan อ่านสถานะจริงทั้งชุด (ตัด incognito/unnamed/privileged, binding scan ครั้งแรก = protected); คิว v3.1 ยิงหลัง diff ต่อ burst: url เปลี่ยน → `moveLiveTabs` (L14), ปิดเอง (isWindowClosing=false + origin ธรรมดา) → `consumeDeletedTabs` (L13); #forgetTab ตัด binding ทุกเส้นทางที่แท็บพ้นขอบเขต | `attach() → Promise` (ลง listeners แบบ sync + reconcile), `reconcile()`, `handle{TabCreated,TabUpdated,TabRemoved,TabAttached,TabDetached,GroupCreated,GroupUpdated,GroupRemoved,WindowRemoved}(...)`, `flushSync()` |
+| `background/restore-engine.js` | opener: หา window เป้าหมาย + existing live group; diff ตาม L11; create → group → update(color เฉพาะกลุ่มใหม่) → discard แบบ staggered (120ms) + per-name mutex + เช็ค window ยังอยู่หลังทุก sleep; ท้าย flow mark `store.markRestoredTabs` (origin 'restored' — ปิดแท็บที่สร้างเอง = record คงอยู่ ไม่ลบ L13) | `openTabs({name, urls}) → {ok, opened, skipped, createdWindow} \| {ok:false, error}` |
+| `background/url-sanitizer.js` | normalize URL (v3.1): lower host, ตัด trailing slash, ตัด `#hash`, ตัด tracking params (`__cf_chl*`, `utm_*`, `fbclid`, `gclid`, `msclkid`, `twclid`, `igshid`, `mc_eid`, `yclid` — `TRACKING_PARAM_PREFIXES`), filter privileged scheme | `normalizeUrl(url, stripTracking=true)`, `isIgnoredUrl(url)`, `sanitizeTitle(title, fallback, url)` |
 | `background/service-worker.js` | จุดเกิด event: `tabs.onCreated/onUpdated/onRemoved/onAttached/onDetached`, `tabGroups.onCreated/onUpdated/onRemoved`, `windows.onRemoved`, `runtime.onInstalled/onStartup` + message router (MSG.GET_STATE/OPEN_TABS/DELETE_GROUP/DELETE_TAB/DELETE_TABS/RENAME_GROUP/SET_THEME); rename จาก popup → `store.renameGroup` + `tabGroups.update` (สองทาง L7) | — |
 | `popup/popup.{html,css,js}` | Pure view: render state, selection,จัดเรียงการ์ด, ส่ง intent RPC, toast, empty-state, theme toggle | — |
 | `shared/` | `constants.js` (timings, 9 colors), `types.js`, `messages.js` | — |
@@ -246,6 +252,9 @@ export type ExtensionMessage =
 | T12 popup render (fixed state stub): sort, filter, selection count, disabled states, empty state | popup |
 | T13 rename ผ่าน RPC + response UI + tabGroups.update mock | L7 popup |
 | T14 mockup visual (สิ่งมี live): contrast tokens, focus ring, reduced-motion — manual + detector + สกรีนช็อต | popup |
+| T15 (v3.1) ปิดเอง (L13) vs ปิด window (isWindowClosing) vs origin ป้องกัน (restored/scan-first); binding persist ข้าม init + prune | L13/L15 |
+| T16 (v3.1) แท็บเปลี่ยน url → record เลื่อนตาม (แถวเก่าลบ, addedAt ต่อเนื่อง); มี instance อื่นยังใช้ url เดิม = คงแถวเดิม | L14 |
+| T17 (v3.1) normalizeUrl ตัด tracking params (`__cf_chl*`, `utm_*`, `fbclid` ฯลฯ) — Token ต่างกัน = record เดียว; param ธุรกิจ (page=2) คงอยู่ | sanitizer |
 
 ข้อระวังเทียบเดิม: e2e restore flow รันภายใต้ fake chrome ได้ครบ (ตรรกะ diff ของ diff-engine เดิมถูกเทียบโดย restore-engine แทน)
 

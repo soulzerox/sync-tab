@@ -95,9 +95,11 @@ export class GroupStore {
       }
       // v3.0.1 — key คลังเดิมอาจยังติด fragment (#hash): ยก key ใหม่ + รวมตัวซ้ำ
       this.#renormalizeStoredTabs();
+      // v3.1 — ฟิลด์ live-binding tracking (backward-compatible — ไม่ bump schema version)
+      if (this.#ensureTrackingFields()) this.#scheduleSave();
     } else {
       // อะไรก็ตามที่ไม่ใช่ v3 — ล้างทั้ง area แล้วสร้าง schema ใหม่ (ระบบเก่าไม่ import)
-      this.#schema = { version: SCHEMA_VERSION, groups: {}, themePreference: undefined, lastScanAt: undefined, migrationNoticeAt: undefined, migrationAckAt: undefined };
+      this.#schema = { version: SCHEMA_VERSION, groups: {}, themePreference: undefined, lastScanAt: undefined, migrationNoticeAt: undefined, migrationAckAt: undefined, liveTabs: {}, restoredTabIds: {} };
       await this.#storage.clear();
       migrated = hasLegacy || Boolean(existing);
       await this.#storage.set({ [STORAGE_KEY]: this.#schema });
@@ -322,6 +324,10 @@ export class GroupStore {
     }
 
     delete groups[oldName];
+    // v3.1 — binding อ้างชื่อกลุ่มเก่า → เปลี่ยนตาม (แท็บที่ยังตื่นอยู่ผูกกับ record ใหม่ทันที)
+    for (const b of Object.values(this.#schema.liveTabs ?? {})) {
+      if (b.g === oldName) b.g = newName;
+    }
     this.#scheduleSave();
   }
 
@@ -365,6 +371,143 @@ export class GroupStore {
     }
     this.#scheduleSave();
     return { removed, groupDeleted };
+  }
+
+  // ------------------------------------------------------------------
+  // v3.1 — Live tab tracking (L13/L14): ผูก tabId ↔ record เพื่อแยก
+  // "ผู้ใช้ปิดแท็บเองจากเบราว์เซอร์" ออกจาก "ปิด window / OOM / คืน session"
+  // ------------------------------------------------------------------
+
+  /** ฟิลด์ tracking ให้พร้อมเสมอ (schema เก่าอาจไม่มี) — คืน true ถ้าเพิ่งสร้าง */
+  #ensureTrackingFields() {
+    if (!this.#schema) return false;
+    let added = false;
+    if (!this.#schema.liveTabs || typeof this.#schema.liveTabs !== "object") { this.#schema.liveTabs = {}; added = true; }
+    if (!this.#schema.restoredTabIds || typeof this.#schema.restoredTabIds !== "object") { this.#schema.restoredTabIds = {}; added = true; }
+    return added;
+  }
+
+  /** binding ล่าสุดของแท็บ (mirror อ่านตอนรับ event; ไม่มีหรือไม่ครบ → null = ถือเป็น protected) */
+  liveBinding(tabId) {
+    if (!this.#schema) return null;
+    const b = this.#schema.liveTabs?.[String(tabId)];
+    if (!b?.g || !b?.k) return null;
+    return { groupName: b.g, urlKey: b.k, restored: Boolean(b.r) };
+  }
+
+  /** เขียน/อัปเดต binding — ธง r (origin ป้องกัน) ติดค้างจาก binding เดิม/restoredTabIds เสมอ */
+  setLiveBinding(tabId, { groupName, urlKey }) {
+    if (!this.#schema || typeof tabId === "undefined" || tabId === null) return;
+    if (!groupName || !urlKey) return;
+    const id = String(tabId);
+    const prev = this.#schema.liveTabs[id];
+    const isMarked = this.#schema.restoredTabIds[id] === 1;
+    const binding = { g: groupName, k: urlKey };
+    if (prev?.r === 1 || isMarked) binding.r = 1;
+    this.#schema.liveTabs[id] = binding;
+    this.#scheduleSave();
+  }
+
+  /** ตั้งธง "ไม่รู้สาเหตุกำเนิด" (แท็บที่เจอจาก scan ครั้งแรก) — ปิดแท็บนี้ = ไม่ลบ record */
+  protectLiveBinding(tabId) {
+    if (!this.#schema) return;
+    const binding = this.#schema.liveTabs[String(tabId)];
+    if (binding && binding.r !== 1) {
+      binding.r = 1;
+      this.#scheduleSave();
+    }
+  }
+
+  clearLiveBinding(tabId) {
+    if (!this.#schema) return;
+    if (delete this.#schema.liveTabs?.[String(tabId)]) this.#scheduleSave();
+  }
+
+  /** ตัด binding/ธง ของแท็บที่ไม่มีใน browser อีก (เรียกตอน reconcile — แท็บปิดไประหว่าง SW หลับ) */
+  pruneLiveBindings(aliveTabIds) {
+    if (!this.#schema) return false;
+    const keep = new Set([...aliveTabIds].map(String));
+    let changed = false;
+    for (const id of Object.keys(this.#schema.liveTabs)) {
+      if (!keep.has(id)) { delete this.#schema.liveTabs[id]; changed = true; }
+    }
+    for (const id of Object.keys(this.#schema.restoredTabIds)) {
+      if (!keep.has(id)) { delete this.#schema.restoredTabIds[id]; changed = true; }
+    }
+    if (changed) this.#scheduleSave();
+    return changed;
+  }
+
+  /** ติดธงแท็บที่ Restore flow สร้าง — ปิดแท็บเหล่านี้ = record คงอยู่ (คุ้มคลังที่ผู้ใช้ขอเก็บไว้) */
+  markRestoredTabs(tabIds) {
+    if (!this.#schema || !Array.isArray(tabIds)) return;
+    let changed = false;
+    for (const tabId of tabIds) {
+      const id = String(tabId);
+      if (this.#schema.restoredTabIds[id] !== 1) { this.#schema.restoredTabIds[id] = 1; changed = true; }
+      const binding = this.#schema.liveTabs[id];
+      if (binding && binding.r !== 1) { binding.r = 1; changed = true; }
+    }
+    if (changed) this.#scheduleSave();
+  }
+
+  /**
+   * L13 — ลบ record ของแท็บที่ผู้ใช้ปิดตัวเอง (explicit close, mirror เรียกหลัง applyLiveMap ต่อ burst) —
+   * ถ้า url ที่ปิดยังมี instance อื่นตื่น (liveCount > 0) หรือแถวหายไปแล้ว = ข้าม
+   */
+  consumeDeletedTabs(deletes) {
+    if (!this.#schema || !Array.isArray(deletes)) return;
+    const seen = new Set();
+    let changed = false;
+    for (const { g, k } of deletes) {
+      if (!g || !k || seen.has(`${g}\n${k}`)) continue;
+      seen.add(`${g}\n${k}`);
+      const record = this.#schema.groups[g];
+      const row = record?.tabs[k];
+      if (!row || row.liveCount !== 0) continue;
+      delete record.tabs[k];
+      record.updatedAt = this.#now();
+      changed = true;
+      // L8 — ไม่มีแท็บเหลือเลย → ลบกลุ่ม
+      if (Object.keys(record.tabs).length === 0) delete this.#schema.groups[g];
+    }
+    if (changed) this.#scheduleSave();
+  }
+
+  /**
+   * L14 — แท็บที่ผูกไว้เปลี่ยนหน้า: record "เลื่อนตาม" — ยกอัตลักษณ์ (addedAt/order) ไปแถว url ใหม่แล้วลบแถวเก่า
+   * (mirror กรองเฉพาะเหตุที่แถวเก่าไม่มี instance อื่นตื่นแชร์ key อยู่แล้ว; แถวใหม่ถ้ามีอยู่ก่อนจะุยอมรวมเข้าด้วยกัน)
+   */
+  moveLiveTabs(moves) {
+    if (!this.#schema || !Array.isArray(moves)) return;
+    const done = new Set();
+    let changed = false;
+    for (const { g, fromKey, toKey } of moves) {
+      if (!g || !fromKey || !toKey || fromKey === toKey || done.has(`${g}\n${fromKey}`)) continue;
+      done.add(`${g}\n${fromKey}`);
+      const record = this.#schema.groups[g];
+      const src = record?.tabs[fromKey];
+      if (!src || src.liveCount > 0) continue;      // ตัวเก่ายังมี instance อื่นใช้อยู่ — ไม่ย้ายอัตลักษณ์
+      const dst = record.tabs[toKey];
+      if (!dst) {
+        record.tabs[toKey] = { ...src, url: toKey };
+      } else {
+        record.tabs[toKey] = {
+          ...dst,
+          favIconUrl: dst.favIconUrl || src.favIconUrl,
+          title: dst.title || src.title,
+          addedAt: Math.min(dst.addedAt ?? src.addedAt ?? 0, src.addedAt ?? dst.addedAt ?? 0),
+          order: Math.min(dst.order ?? src.order ?? 0, src.order ?? dst.order ?? 0)
+        };
+      }
+      delete record.tabs[fromKey];
+      record.updatedAt = this.#now();
+      changed = true;
+    }
+    if (changed) {
+      this.#gcEmptyGroups();
+      this.#scheduleSave();
+    }
   }
 
   /**

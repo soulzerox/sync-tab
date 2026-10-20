@@ -296,3 +296,112 @@ test("rename ไม่สะเทือน records บน applyLiveMap ซ้�
   assert.equal(t2.url, t1.url);
   assert.ok(!snap2.groups["old"], "ไม่มี duplicate ชื่อเก่า");
 });
+
+// ==================================================================
+// v3.1 — L13/L14: ปิดแท็บเอง = ลบ record · ปิด window = หลับ · url เปลี่ยน = เลื่อนตาม
+// ==================================================================
+
+test("L13(v3.1): แท็บที่ mirror จับตอน live แล้วผู้ใช้ปิดเอง → record ถูกลบ + GC กลุ่มว่าง", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน B", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 400, url: "https://new.example", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  assert.ok(store.snapshot().groups["งาน B"]?.tabs["https://new.example"], "register ครบตั้งแต่ event");
+
+  mirror.handleTabRemoved(400, { windowId: 101, isWindowClosing: false });
+  mirror.flushSync();
+  await store.flush();
+  assert.ok(!store.snapshot().groups["งาน B"], "record ถูกลบตามผู้ใช้ปิด (แท็บ browser ไม่ถูกแตะ)");
+});
+
+test("L13(v3.1): ปิดทั้ง window (isWindowClosing=true) → record คงอยู่เป็นหลับ (กฎเดิม)", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน W", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 401, url: "https://w.example", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+
+  mirror.handleTabRemoved(401, { windowId: 101, isWindowClosing: true });
+  mirror.flushSync();
+  await store.flush();
+  const t = store.snapshot().groups["งาน W"]?.tabs["https://w.example"];
+  assert.ok(t, "ปิด window = คง record ไว้เปิดคืนได้");
+  assert.equal(t.liveCount, 0);
+});
+
+test("L13(v3.1): แท็บที่ scan ครั้งแรกเจอ (protected origin — สาเหตุกำเนิดไม่แน่) ปิดเอง → ไม่ลบ", async () => {
+  const { store, mirror } = harness({ windows: [{ id: 101, groups: [{ id: 100, title: "ตอนจิ" }], tabs: [{ id: 402, url: "https://old.example", groupId: 100 }] }] });
+  await store.init();
+  await mirror.attach();
+  assert.ok(store.snapshot().groups["ตอนจิ"]);
+
+  mirror.handleTabRemoved(402, { windowId: 101, isWindowClosing: false });
+  mirror.flushSync();
+  await store.flush();
+  const t = store.snapshot().groups["ตอนจิ"]?.tabs["https://old.example"];
+  assert.ok(t, "protected — คง record เป็นหลับ");
+  assert.equal(t.liveCount, 0);
+});
+
+test("L13(v3.1): mark restored ทีหลัง register (restore engine ยิงท้าย flow) → ปิดไม่ลบ", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน R", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 403, url: "https://r.example", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+
+  store.markRestoredTabs([403]);   // RestoreEngine เรียกใน finally หลัง create ทุกแท็บ
+  mirror.handleTabRemoved(403, { windowId: 101, isWindowClosing: false });
+  mirror.flushSync();
+  await store.flush();
+  const t = store.snapshot().groups["งาน R"]?.tabs["https://r.example"];
+  assert.ok(t, "origin restored — record คงอยู่");
+  assert.equal(t.liveCount, 0);
+});
+
+test("L14(v3.1): แท็บที่ผูกไว้เปลี่ยน url → record เลื่อนตาม (แถวเก่าลบ, addedAt เดินตาม)", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน C", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 404, url: "https://c/start", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  const start = store.snapshot().groups["งาน C"]?.tabs["https://c/start"];
+  assert.ok(start);
+
+  mirror.handleTabUpdated(404, {}, { ...tabEvent({ id: 404, url: "https://c/next", title: "Next", favIconUrl: "n.png", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  await store.flush();
+
+  const tabs = store.snapshot().groups["งาน C"]?.tabs ?? {};
+  assert.deepEqual(Object.keys(tabs), ["https://c/next"], "ไม่มี record ค้างบน url เดิม");
+  assert.equal(tabs["https://c/next"].addedAt, start.addedAt, "อัตลักษณ์ record เดินตามแท็บ");
+  assert.equal(tabs["https://c/next"].title, "Next");
+});
+
+test("L14(v3.1): url เดิมยังมีแท็บอื่นตื่นอยู่ → แถวเดิมคงอยู่ (แค่ count ลด)", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน D", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 405, url: "https://d/p", groupId: 300, windowId: 101 }) });
+  mirror.handleTabCreated({ ...tabEvent({ id: 406, url: "https://d/p", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  assert.equal(store.snapshot().groups["งาน D"].tabs["https://d/p"].liveCount, 2);
+
+  mirror.handleTabUpdated(405, {}, { ...tabEvent({ id: 405, url: "https://d/q", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  await store.flush();
+  const tabs = store.snapshot().groups["งาน D"].tabs;
+  assert.equal(tabs["https://d/p"].liveCount, 1, "url เดิมยังมีชีวิต — ไม่ลบ");
+  assert.ok(tabs["https://d/q"], "แท็บที่เปลี่ยนหน้ามี record ตัวเอง");
+});

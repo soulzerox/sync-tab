@@ -20,7 +20,9 @@
 | **Restore** | การเปิดแท็บจำไว้กลับเข้า browser ตามคำสั่งผู้ใช้: เติมเข้า Live group ชื่อเดียวกัน หรือสร้างกลุ่มใหม่ในหน้าต่างเป้าหมาย | sync (คำเก่า), recover, reopen |
 | **เปิดแบบหลับ / Sleeping Tab** | แท็บที่ถูก create → จัดกลุ่ม → `tabs.discard()`: โชว์ favicon/title แต่ไม่โหลดเนื้อหาจนกว่าจะถูกคลิก | lazy load, suspended (คำเก่า), sleeping ใน Edge UI ✓ |
 | **Trans group** | กลุ่มที่ถูกสร้างบน browser แล้วถูกปิดทิ้งไปก่อนจะมีแท็บ web ตัวจริงอย่างน้อย 1 — ไม่เข้าคลัง (L9) | "กลุ่มว่าง" |
-| **Normalized URL** | URL ที่ผ่าน url-sanitizer: ฟิลเตอร์ scheme พิเศษและทำรูปแบบให้เทียบเท่ากัน — host ตัวเล็ก, ตัด trailing slash, **ตัด fragment `#hash` ทิ้ง (v3.0.1: หน้าเดียวกัน hash ต่างกัน = record เดียวกัน)** — ฐานให้ dedupe ของ record | ตัด utm (ไม่ทำ — การสันดาปพารามิเตอร์ติดตามเป็น feature ของระบบเก่าที่ถูกถอด) |
+| **Normalized URL** | URL ที่ผ่าน url-sanitizer: ฟิลเตอร์ scheme พิเศษและทำรูปแบบให้เทียบเท่ากัน — host ตัวเล็ก, ตัด trailing slash, **ตัด fragment `#hash` ทิ้ง (v3.0.1: หน้าเดียวกัน hash ต่างกัน = record เดียวกัน)**, **ตัด query params ติดตาม (v3.1: `__cf_chl*`, `utm_*`, `fbclid`, `gclid` ฯลฯ — token เฉพาะเหตุการณ์ต่างกันต่อเซสชันแต่หน้าเดียวกัน = record เดียวกัน)** — ฐานให้ dedupe ของ record | อย่าเข้าใจว่า "ตัดพารามิเตอร์ทุกตัว" — param ทำงานจริง (เช่น `page=2`) ยังคงอยู่ |
+| **Live binding (v3.1)** | การผูก tabId จริง ↔ tab record (schema `liveTabs`: {ชื่อกลุ่ม, url key, ธง origin}; persist ใน storage รอดจาก SW restart) — ทำให้ record เลื่อนตามแท็บเมื่อเปิดหน้าใหม่ (L14) และแยก "ผู้ใช้ปิดแท็บเอง" ออกจาก "ปิด window/ตาย" (L13) | uid ถาวรของ record (ไม่มีคอนเซปต์นี้ — url ยังเป็นตัวตน), map หน่วยความจำล้วน (ไม่ใช่ — persist) |
+| **Origin ป้องกัน (`r=1`) (v3.1)** | ธงบน binding ของแท็บที่ RestoreEngine สร้าง (`restoredTabIds`) และแท็บที่ reconcile/scan เจอครั้งแรก (สาเหตุกำเนิดไม่แน่) — ปิดแท็บเหล่านี้ = record หลับเหมือน v3.0 ไม่ลบ | "แท็บทุกตัวไม่ลบ" (ไม่ใช่ — แท็บที่จับจาก event ธรรมดา ปิดเองลบจริงตาม L13) |
 | **Full rescan** | คำสั่งผู้ใช้ (Alt+Shift+S) เรียก reconcile รอบใหม่ด้วยตนเอง | auto scan, alarm (มีเฉพาะ event-driven) |
 
 ## ประวัติการถอดรื้อ (สั้น)

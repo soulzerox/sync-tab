@@ -46,6 +46,7 @@ export class RestoreEngine {
     if (!this.#store.getGroups()[name]) return { ok: false, error: "no-record" };
     if (this.#busyNames.has(name)) return { ok: false, error: "busy" };
     this.#busyNames.add(name);
+    const createdIds = []; // v3.1 — แท็บที่ restore สร้างจริง (mark ใน finally แม้ window หลุดกลางทาง)
 
     try {
       const target = await this.#pickTargetWindow();
@@ -87,6 +88,7 @@ export class RestoreEngine {
           active: false,
           pinned: false
         });
+        createdIds.push(created.id);
 
         if (groupId === null) {
           groupId = await this.#chrome.tabs.group({ tabIds: [created.id], createProperties: { windowId } });
@@ -104,6 +106,8 @@ export class RestoreEngine {
       return { ok: false, error: err?.message ? String(err.message).slice(0, 120) : "restore-failed" };
     } finally {
       this.#busyNames.delete(name);
+      // v3.1 — ธง origin 'restored': ปิดแท็บพวกนี้เอง = record คงอยู่ (ไม่ลบคลังที่ผู้ใช้ขอไว้)
+      if (createdIds.length) this.#store.markRestoredTabs(createdIds);
     }
   }
 

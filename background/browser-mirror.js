@@ -38,6 +38,8 @@ export class BrowserMirror {
   #tabsByTabId = new Map();
   #incognitoWindows = new Set();
   #emitTimer = null;
+  #pendingDeletes = [];   // v3.1 L13 — รอลบ record (explicit close) ยิงหลัง applyLiveMap ต่อ burst
+  #pendingMoves = [];     // v3.1 L14 — record เลื่อนตามแท็บที่เปลี่ยน url ยิงหลัง applyLiveMap ต่อ burst
 
   // ------------------------------------------------------------------
   // Attach — ต้องเรียกแบบ synchronous ตอน service worker เริ่ม (MV3 rules)
@@ -83,8 +85,10 @@ export class BrowserMirror {
     }
     for (const w of windows) {
       if (w.incognito) continue;
-      for (const t of w.tabs ?? []) this.#tryRegisterTab(t);
+      for (const t of w.tabs ?? []) this.#tryRegisterTab(t, true);
     }
+    // v3.1 — ตัด binding/ธงของแท็บที่ปิดไประหว่าง SW หลับ (record ของมัน retire โดย diff แล้ว)
+    this.#store.pruneLiveBindings([...this.#tabsByTabId.keys()]);
     this.#syncNow({ markScan: true });
   }
 
@@ -132,12 +136,30 @@ export class BrowserMirror {
     if (tab.discarded && !prev) return; // แท็บหลับที่ไม่เคยจับ — ไม่สร้าง record จากแท็บหลับลอย ๆ
     if (tab.discarded) return; // แท็บหลับไม่จัดการ title/favicon ใหม่ (SOT §6)
 
+    // v3.1 L14 — แท็บที่ผูกไว้เปิดหน้าใหม่: คิว "record เลื่อนตาม" (คิดหลัง rebuild ต่อ burst)
+    // origin ป้องกัน (restored/scan-first) ไม่เลื่อน — แถวเดิมค้างเป็นหลับตาม v3.0
+    const newUrl = normalizeUrl(tab.url || "");
+    if (prev && newUrl && newUrl !== prev.url) {
+      const groupName = this.#groupsByGroupId.get(prev.groupId)?.name ?? "";
+      const bind = this.#store.liveBinding(tabId);
+      if (bind && bind.groupName === groupName && bind.urlKey === prev.url && !bind.restored) {
+        this.#pendingMoves.push({ g: groupName, fromKey: prev.url, toKey: newUrl });
+      }
+      if (groupName) this.#store.setLiveBinding(tabId, { groupName, urlKey: newUrl });
+    }
+
     this.#tryRegisterTab(tab);
     this.#scheduleEmit();
   }
 
   handleTabRemoved(tabId, removeInfo) {
     if (removeInfo?.windowId && this.#incognitoWindows.has(removeInfo.windowId)) return;
+    // อ่าน binding ก่อนลืมแท็บ — ตัวชี้ record ที่แท็บนี้ถืออยู่ (persist — รอดจาก SW ตาย)
+    const bind = this.#store.liveBinding(tabId);
+    // L13 — ผู้ใช้ปิดแท็บตัวเดียว (isWindowClosing=false) และแท็บไม่ใช่ origin ป้องกัน (restore/scan-first)
+    if (removeInfo?.isWindowClosing !== true && bind && bind.groupName && bind.urlKey && !bind.restored) {
+      this.#pendingDeletes.push({ g: bind.groupName, k: bind.urlKey });
+    }
     this.#forgetTab(tabId);
     this.#scheduleEmit();
   }
@@ -229,8 +251,9 @@ export class BrowserMirror {
     }
   }
 
-  /** พยายามลงทะเบียนแท็บตามเงื่อนไข L1 — คืน true เมื่ออยู่ในขอบเขต sync */
-  #tryRegisterTab(t) {
+  /** พยายามลงทะเบียนแท็บตามเงื่อนไข L1 — คืน true เมื่ออยู่ในขอบเขต sync
+   * @param {boolean} [peek] true = เจอจาก full scan (reconcile) — สาเหตุกำเนิดไม่แน่ชัด → ธงป้องกัน (ปิดไม่ลบ) */
+  #tryRegisterTab(t, peek = false) {
     if (!t || typeof t.id !== "number") return false;
     if (t.incognito || this.#incognitoWindows.has(t.windowId)) return false;
     const url = normalizeUrl(t.url);
@@ -246,6 +269,18 @@ export class BrowserMirror {
       favIconUrl: t.favIconUrl || undefined
     });
 
+    // v3.1 — ผูก tabId ↔ record (ถ้ามี binding เดิม: url/ชื่อกลุ่มเปลี่ยนตาม, ธง origin ติดค้าง)
+    const groupName = this.#groupsByGroupId.get(t.groupId)?.name;
+    if (groupName && url) {
+      const bind = this.#store.liveBinding(t.id);
+      if (!bind) {
+        this.#store.setLiveBinding(t.id, { groupName, urlKey: url });
+        if (peek) this.#store.protectLiveBinding(t.id);
+      } else if (bind.urlKey !== url || bind.groupName !== groupName) {
+        this.#store.setLiveBinding(t.id, { groupName, urlKey: url });
+      }
+    }
+
     // กลุ่มหายไปจาก registry (rare — group event ทำงานก่อน tab event แต่บางแท็บรับก่อน)
     if (!this.#groupsByGroupId.has(t.groupId)) this.#rememberGroupFromTab(t);
     return true;
@@ -260,13 +295,22 @@ export class BrowserMirror {
         const name = (g.title ?? "").trim();
         if (!name) return;
         this.#groupsByGroupId.set(g.id, { windowId: g.windowId ?? tab.windowId, name, color: validColor(g.color) });
+        // v3.1 — แท็บของกลุ่มนี้ที่ register มาก่อนชื่อ (lazy) → เกาะ binding ตอนนี้
+        for (const [tabId, entry] of this.#tabsByTabId) {
+          if (entry.groupId !== g.id) continue;
+          const bind = this.#store.liveBinding(tabId);
+          if (!bind || bind.urlKey !== entry.url) {
+            this.#store.setLiveBinding(tabId, { groupName: name, urlKey: entry.url });
+          }
+        }
         this.#scheduleEmit();
       })
       .catch(() => { /* group หายไปก่อน query — แท็บลอยไม่จับ */ });
   }
 
   #forgetTab(tabId) {
-    this.#tabsByTabId.delete(tabId);
+    // v3.1 — เมื่อแท็บพ้นขอบเขต/หายไป ตัด binding โดยรวมทุกเส้นทาง (removed/detach/window/group)
+    if (this.#tabsByTabId.delete(tabId)) this.#store.clearLiveBinding(tabId);
   }
 
   // ------------------------------------------------------------------
@@ -295,10 +339,22 @@ export class BrowserMirror {
     return live;
   }
 
-  /** rebuild → เขียนเข้าคลัง (store diff + persist เอง) */
+  /** rebuild → เขียนเข้าคลัง (store diff + persist เอง) แล้วรันงานคิว v3.1 ที่ต้องเกิด "หลัง" diff แล้ว */
   #syncNow({ markScan = false } = {}) {
     if (!this.#store.ready) return; // init ยังไม่จบ — ข้าม (event หลัง init จะสร้างครบเอง)
-    this.#store.applyLiveMap(Object.fromEntries(this.#buildLiveMap()), { markScan });
+    const live = Object.fromEntries(this.#buildLiveMap());
+    this.#store.applyLiveMap(live, { markScan });
+
+    // v3.1 — เลื่อน record ตามแท็บ (L14) ก่อน แล้วค่อยลบของแท็บที่ปิดเอง (L13)
+    // กรอง key ที่ยังมี instance อื่นตื่นอยู่ใน liveMap — ตัวพวกนั้นแถวยังต้องมีชีวิต
+    if (this.#pendingMoves.length) {
+      const moves = this.#pendingMoves.splice(0).filter(m => !live?.[m.g]?.tabs?.[m.fromKey]);
+      if (moves.length) this.#store.moveLiveTabs(moves);
+    }
+    if (this.#pendingDeletes.length) {
+      const deletes = this.#pendingDeletes.splice(0).filter(d => !live?.[d.g]?.tabs?.[d.k]);
+      if (deletes.length) this.#store.consumeDeletedTabs(deletes);
+    }
   }
 
   #scheduleEmit() {
