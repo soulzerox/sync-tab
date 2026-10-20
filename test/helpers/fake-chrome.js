@@ -59,6 +59,8 @@ export function createFakeChrome(seed = {}) {
           windowId,
           groupId: -1,
           url: createProperties.url ?? "",
+          // จำลอง Edge จริง: ตอน create แท็บยังไม่ commit URL — url ว่าง, pendingUrl มีค่า
+          pendingUrl: createProperties.url ?? "",
           title: createProperties.url ?? "New Tab",
           favIconUrl: "",
           active: Boolean(createProperties.active),
@@ -69,9 +71,22 @@ export function createFakeChrome(seed = {}) {
         };
         tabs.set(id, tab);
         ops.push({ fn: "tabs.create", args: { ...createProperties } });
-        // จำลอง Chrome/Edge จริง: navigation เริ่มตอน create — ยิง onUpdated {status:"loading"} + url ทันที
+        // Edge จริงยิง onUpdated {status:"loading"} ก่อน URL commit — ใครนับเป็น "commit" เร็วเกินจะ discard ทันที
+        // (แท็บว่าง "Untitled") — commit จริงคือ event ที่มี changeInfo.url
         for (const fn of listeners.tabs.onUpdated) {
-          fn(id, { status: "loading", url: tab.url }, { ...tab });
+          fn(id, { status: "loading" }, { ...tab });
+        }
+        // commit จริง (Edge ส่ง changeInfo.url เมื่อ navigation เริ่ม) — หน่วงเล็กน้อยให้เหมือนของจริง
+        if (tab.pendingUrl) {
+          globalThis.setTimeout(() => {
+            const t = tabs.get(id);
+            if (!t || t.discarded) return;
+            t.url = t.pendingUrl;
+            t.status = "complete";
+            for (const fn of listeners.tabs.onUpdated) {
+              fn(id, { status: "loading", url: t.url }, { ...t });
+            }
+          }, 0);
         }
         return { ...tab };
       },

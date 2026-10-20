@@ -510,18 +510,20 @@ export class GroupStore {
 
   /**
    * L14 — แท็บที่ผูกไว้เปลี่ยนหน้า: record "เลื่อนตาม" — ยกอัตลักษณ์ (addedAt/order) ไปแถว url ใหม่แล้วลบแถวเก่า
-   * (mirror กรองเฉพาะเหตุที่แถวเก่าไม่มี instance อื่นตื่นแชร์ key อยู่แล้ว; แถวใหม่ถ้ามีอยู่ก่อนจะุยอมรวมเข้าด้วยกัน)
+   * (แถวใหม่ถ้ามีอยู่ก่อนจะุยอมรวมเข้าด้วยกัน)
+   * v3.2 — `remaining` = จำนวน instance อื่นที่ยังใช้ URL เดิม (mirror ส่งมาจาก liveMap):
+   *   มี → แถวเดิมต้องคง (count ลดเองตอน diff), ไม่มี → ลบแถวเก่าได้เลย
    */
   moveLiveTabs(moves) {
     if (!this.#schema || !Array.isArray(moves)) return;
     const done = new Set();
     let changed = false;
-    for (const { g, fromKey, toKey } of moves) {
+    for (const { g, fromKey, toKey, remaining } of moves) {
       if (!g || !fromKey || !toKey || fromKey === toKey || done.has(`${g}\n${fromKey}`)) continue;
       done.add(`${g}\n${fromKey}`);
       const record = this.#schema.groups[g];
       const src = record?.tabs[fromKey];
-      if (!src || src.liveCount > 0) continue;      // ตัวเก่ายังมี instance อื่นใช้อยู่ — ไม่ย้ายอัตลักษณ์
+      if (!src) continue;
       const dst = record.tabs[toKey];
       if (!dst) {
         record.tabs[toKey] = { ...src, url: toKey };
@@ -534,7 +536,12 @@ export class GroupStore {
           order: Math.min(dst.order ?? src.order ?? 0, src.order ?? dst.order ?? 0)
         };
       }
-      delete record.tabs[fromKey];
+      // แถวเดิมคงไว้ถ้ามี instance อื่นยังใช้ URL เดิม (mirror บอกมา) — ไม่งั้นแท็บที่เปิดค้างจริง
+      // กลายเป็นแถวหลับคู่กับแท็บใหม่ = ดูเหมือน dedupe ไม่ทำ
+      const others = Number.isFinite(remaining) ? remaining : (src.liveCount > 0 ? 1 : 0);
+      if (others <= 0) {
+        delete record.tabs[fromKey];
+      }
       record.updatedAt = this.#now();
       changed = true;
     }

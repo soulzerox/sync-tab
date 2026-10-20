@@ -128,7 +128,8 @@ export class RestoreEngine {
         // ตรวจซ้ำหลัง discard: ถ้าเบราว์เซอร์ทำ URL หลุด (ไม่มี url/pendingUrl ทั้งคู่) — ตั้งกลับให้เป็นแผนสุดท้าย
         try {
           const finalTab = await this.#chrome.tabs.get(created.id);
-          if (finalTab && isIgnoredUrl(finalTab.url || finalTab.pendingUrl || "")) {
+          // v3.2 — ตรวจทั้ง url และ pendingUrl (Edge อาจมีแค่อันเดียวตอนนั้น)
+          if (finalTab && isIgnoredUrl(finalTab.url || "") && isIgnoredUrl(finalTab.pendingUrl || "")) {
             await this.#chrome.tabs.update(created.id, { url: entry.url });
           }
         } catch { /* แท็บหายไปแล้ว — ไม่มีอะไรจะกู้ */ }
@@ -179,7 +180,9 @@ export class RestoreEngine {
   async #ensurePendingUrl(created, url) {
     if (!created || typeof created.id !== "number") return;
     try {
-      const gotUrl = String(created.pendingUrl ?? created.url ?? "");
+      // v3.2 — Edge คืน pendingUrl ที่มีค่าแต่ url ว่าง (ยังไม่ commit) — เช็คทั้งสองฟิลด์:
+      // ถ้าอันไหนอันหนึ่งว่าง/privileged แปลว่าแท็บยังไม่มี URL จริง → ตั้งให้แน่นอน
+      const gotUrl = String(created.url || created.pendingUrl || "");
       if (isIgnoredUrl(gotUrl)) {
         await this.#chrome.tabs.update(created.id, { url });
       }
@@ -191,13 +194,16 @@ export class RestoreEngine {
     if (this.#commitArmed) return;
     this.#commitArmed = true;
     this.#chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-      if (!changeInfo || (changeInfo.status === undefined && changeInfo.url === undefined && changeInfo.title === undefined)) return;
+      if (!changeInfo) return;
+      // v3.2 — "commit" = URL ปรากฏจริงใน changeInfo (Edge ส่ง {status:"loading"} ก่อน URL เข้า
+      // ถ้านับ event ใด ๆ เป็น commit → discard ทันทีก่อน navigation เริ่ม → แท็บว่าง "Untitled")
+      if (changeInfo.url === undefined) return;
       this.#updatedTick += 1;
       this.#commitSeen.set(String(tabId), this.#updatedTick);
       const waiters = this.#commitWaiters.get(tabId);
       if (waiters) {
         this.#commitWaiters.delete(tabId);
-        for (const settle of waiters) settle(); // navigation เริ่มจริงแล้ว — discard ได้โดยไม่ง้อ timeout
+        for (const settle of waiters) settle(); // URL เข้าแล้ว — discard ได้โดยไม่ง้อ timeout
       }
     });
   }

@@ -408,6 +408,82 @@ test("L14(v3.1): url เดิมยังมีแท็บอื่นตื�
 });
 
 // ------------------------------------------------------------------
+// v3.2 — แก้จากข้อมูลจริงใน Edge: URL ใหม่มากับ changeInfo (ไม่ใช่ tab.url),
+// แท็บที่ scan เจอ (r=1) ต้องเลื่อน record ตามแท็บได้, แท็บใหม่ใช้ pendingUrl
+// ------------------------------------------------------------------
+
+test("v3.2: URL ใหม่มากับ changeInfo (Edge ส่ง tab.url ยังเป็นค่าเก่า) → binding + record เดินตามแท็บ", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน F", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 407, url: "https://f/old", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  assert.equal(store.liveBinding(407)?.urlKey, "https://f/old");
+
+  // Edge จริง: changeInfo.url = URL ใหม่, tab.url = ค่าเก่า (ยังไม่ commit)
+  mirror.handleTabUpdated(407, { url: "https://f/new", status: "loading" }, { ...tabEvent({ id: 407, url: "https://f/old", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  await store.flush();
+
+  const tabs = store.snapshot().groups["งาน F"]?.tabs ?? {};
+  assert.deepEqual(Object.keys(tabs), ["https://f/new"], "แถวเก่าต้องถูกย้าย ไม่ใช่ค้างเป็นซ้ำ");
+  assert.equal(store.liveBinding(407)?.urlKey, "https://f/new", "binding เดินตามแท็บ");
+});
+
+test("v3.2: แท็บที่ reconcile เจอครั้งแรก (origin r=1) แล้วเปลี่ยนหน้า → record เดินตาม (ไม่ค้างซ้ำ)", async () => {
+  const { store, mirror } = harness({
+    windows: [{ id: 101, focused: true, groups: [{ id: 100, title: "งาน G", color: "blue" }], tabs: [{ id: 108, url: "https://g/old", groupId: 100 }] }]
+  });
+  await store.init();
+  await mirror.reconcile();
+  assert.equal(store.liveBinding(108)?.restored, true, "scan ครั้งแรก = origin ป้องกัน (r=1)");
+
+  mirror.handleTabUpdated(108, { url: "https://g/new", status: "loading" }, { ...tabEvent({ id: 108, url: "https://g/old", groupId: 100, windowId: 101 }) });
+  mirror.flushSync();
+  await store.flush();
+
+  const tabs = store.snapshot().groups["งาน G"]?.tabs ?? {};
+  assert.deepEqual(Object.keys(tabs), ["https://g/new"], "r=1 เดิมข้ามการเลื่อน = เห็นเป็นแท็บซ้ำ (บั๊กจริงจากข้อมูล Edge)");
+  assert.equal(store.liveBinding(108)?.urlKey, "https://g/new");
+});
+
+test("v3.2: แท็บใหม่ที่ Edge ส่งมา url ว่างแต่มี pendingUrl → จับได้เลย", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน H", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 409, url: "", groupId: 300, windowId: 101 }), pendingUrl: "https://h/page" });
+  mirror.flushSync();
+
+  const tabs = store.snapshot().groups["งาน H"]?.tabs ?? {};
+  assert.ok(tabs["https://h/page"], "pendingUrl คือตัวตนของแท็บระหว่างโหลด");
+  assert.equal(store.liveBinding(409)?.urlKey, "https://h/page");
+});
+
+test("v3.2: แท็บเปลี่ยนหน้าโดยมีแท็บอื่นใช้ URL เดิมอยู่ → แถวเดิมคง (count ลด) แถวใหม่ได้ record", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน I", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 410, url: "https://i/p", groupId: 300, windowId: 101 }) });
+  mirror.handleTabCreated({ ...tabEvent({ id: 411, url: "https://i/p", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  assert.equal(store.snapshot().groups["งาน I"].tabs["https://i/p"].liveCount, 2);
+
+  mirror.handleTabUpdated(410, { url: "https://i/q", status: "loading" }, { ...tabEvent({ id: 410, url: "https://i/p", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  await store.flush();
+
+  const tabs = store.snapshot().groups["งาน I"].tabs;
+  assert.equal(tabs["https://i/p"].liveCount, 1, "แท็บอื่นยังใช้ URL เดิม — แถวเดิมคงชีวิต");
+  assert.ok(tabs["https://i/q"], "แท็บที่เปลี่ยนหน้ามี record ตัวเอง");
+});
+
+// ------------------------------------------------------------------
 // L17 (v3.1) — แท็บหลับแบบ Edge Sleeping Tabs (`discarded=true` แต่ยังเปิดค้างใน strip)
 // ------------------------------------------------------------------
 

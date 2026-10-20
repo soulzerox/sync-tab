@@ -88,6 +88,13 @@ export class BrowserMirror {
       for (const t of w.tabs ?? []) {
         // แท็บตื่นจริงบน browser — ธง s (ผลจาก restore) หมดอายุทันที กู้จังหวะ SW ตายหลังผู้ใช้กดตื่นแต่ก่อน persist
         if (!t.discarded) this.#store.clearSleepingFlag(t.id);
+        // v3.2 — กู้แถวค้าง: binding ชี้ URL เก่า แต่แท็บจริงเปลี่ยนหน้าไปแล้ว (เกิดตอน SW ไม่ได้รับ event)
+        // → ย้าย record ตามแท็บ (L14) ไม่งั้นแถวเก่าค้างเป็น "จำไว้ (หลับ)" ซ้ำกับแท็บที่เปิดอยู่
+        const bind = this.#store.liveBinding(t.id);
+        const realUrl = normalizeUrl(t.url || t.pendingUrl || "");
+        if (bind && realUrl && realUrl !== bind.urlKey && !this.#store.isRestoredTab(t.id)) {
+          this.#pendingMoves.push({ g: bind.groupName, fromKey: bind.urlKey, toKey: realUrl, tabId: t.id });
+        }
         this.#tryRegisterTab(t, true);
       }
     }
@@ -114,7 +121,8 @@ export class BrowserMirror {
   handleTabCreated(tab) {
     if (!tab) return;
     if (tab.incognito || this.#incognitoWindows.has(tab.windowId)) return;
-    this.#tryRegisterTab(tab);
+    // แท็บใหม่จาก Edge: url ยังว่างระหว่างโหลด — ใช้ pendingUrl (URL ที่จะโหลด) เป็นตัวตนชั่วคราว
+    this.#tryRegisterTab(tab, false, tab.pendingUrl || "");
     this.#scheduleEmit();
   }
 
@@ -152,7 +160,7 @@ export class BrowserMirror {
         this.#scheduleEmit();
         return;
       }
-      this.#tryRegisterTab(tab); // แท็บหลับที่ไม่เคยจับ — ยังเป็นแท็บเปิดจริงในกลุ่ม
+      this.#tryRegisterTab(tab, false, changeInfo?.url || ""); // แท็บหลับที่ไม่เคยจับ — ยังเป็นแท็บเปิดจริงในกลุ่ม
       this.#scheduleEmit();
       return;
     }
@@ -162,18 +170,21 @@ export class BrowserMirror {
     }
 
     // v3.1 L14 — แท็บที่ผูกไว้เปิดหน้าใหม่: คิว "record เลื่อนตาม" (คิดหลัง rebuild ต่อ burst)
-    // origin ป้องกัน (restored/scan-first) ไม่เลื่อน — แถวเดิมค้างเป็นหลับตาม v3.0
-    const newUrl = normalizeUrl(tab.url || "");
+    // URL ใหม่มาจาก changeInfo.url (Edge ส่ง URL ที่เปลี่ยนใน changeInfo — tab.url ใน event ยังเป็นค่าเก่า/ว่าง)
+    // v3.2 — เลื่อนได้แม้ origin ป้องกัน (r=1 = เจอจาก scan): เดิมข้ามทุกแท็บที่ scan เจอ
+    // → แถวเก่าค้างหลับ + แถวใหม่โผล่ = เห็นเป็นแท็บซ้ำ (dedupe ไม่ทำงานจริง) + binding ไม่เดินตามแท็บ
+    // ยกเว้นแท็บผลจาก restore (restoredTabIds) — คงแถวเดิมไว้ให้เปิดกลับได้ตามเดิม
+    const newUrl = normalizeUrl(changeInfo?.url || tab.url || "");
     if (prev && newUrl && newUrl !== prev.url) {
       const groupName = this.#groupsByGroupId.get(prev.groupId)?.name ?? "";
       const bind = this.#store.liveBinding(tabId);
-      if (bind && bind.groupName === groupName && bind.urlKey === prev.url && !bind.restored) {
-        this.#pendingMoves.push({ g: groupName, fromKey: prev.url, toKey: newUrl });
+      if (bind && bind.groupName === groupName && bind.urlKey === prev.url && !this.#store.isRestoredTab(tabId)) {
+        this.#pendingMoves.push({ g: groupName, fromKey: prev.url, toKey: newUrl, tabId });
       }
       if (groupName) this.#store.setLiveBinding(tabId, { groupName, urlKey: newUrl });
     }
 
-    this.#tryRegisterTab(tab);
+    this.#tryRegisterTab(tab, false, changeInfo?.url || "");
     this.#scheduleEmit();
   }
 
@@ -277,12 +288,14 @@ export class BrowserMirror {
   }
 
   /** พยายามลงทะเบียนแท็บตามเงื่อนไข L1 — คืน true เมื่ออยู่ในขอบเขต sync
-   * @param {boolean} [peek] true = เจอจาก full scan (reconcile) — สาเหตุกำเนิดไม่แน่ชัด → ธงป้องกัน (ปิดไม่ลบ) */
-  #tryRegisterTab(t, peek = false) {
+   * @param {boolean} [peek] true = เจอจาก full scan (reconcile) — สาเหตุกำเนิดไม่แน่ชัด → ธงป้องกัน (ปิดไม่ลบ)
+   * @param {string} [urlOverride] URL จริงจาก changeInfo/pendingUrl (แท็บใหม่ที่ url ยังว่าง) */
+  #tryRegisterTab(t, peek = false, urlOverride = "") {
     if (!t || typeof t.id !== "number") return false;
     if (t.incognito || this.#incognitoWindows.has(t.windowId)) return false;
-    const url = normalizeUrl(t.url);
-    if (!url || isIgnoredUrl(t.url)) return false;
+    const rawUrl = urlOverride || t.pendingUrl || t.url || "";
+    const url = normalizeUrl(rawUrl);
+    if (!url || isIgnoredUrl(rawUrl)) return false;
     if (typeof t.groupId !== "number" || t.groupId === TAB_ID_NONE) return false;
 
     // สถานะ "หลับ" ที่ registry จำไว้ (buildLiveMap คิดจากธง s ใน binding เป็นหลัก — ธงนี้ไว้ตามจับการตื่น/หลับเปลี่ยนมือ):
@@ -342,6 +355,19 @@ export class BrowserMirror {
       .catch(() => { /* group หายไปก่อน query — แท็บลอยไม่จับ */ });
   }
 
+  /** จำนวน instance อื่น (นอกจากแท็บที่กำลังย้าย) ที่ยังใช้ URL นี้ในกลุ่มนี้ */
+  #countInstances(groupName, url, exceptTabId) {
+    let count = 0;
+    for (const [tabId, entry] of this.#tabsByTabId) {
+      if (tabId === exceptTabId) continue;
+      if (entry.url !== url) continue;
+      const g = this.#groupsByGroupId.get(entry.groupId);
+      if ((g?.name ?? "") !== groupName) continue;
+      count += 1;
+    }
+    return count;
+  }
+
   #forgetTab(tabId) {
     // v3.1 — เมื่อแท็บพ้นขอบเขต/หายไป ตัด binding โดยรวมทุกเส้นทาง (removed/detach/window/group)
     if (this.#tabsByTabId.delete(tabId)) this.#store.clearLiveBinding(tabId);
@@ -386,7 +412,12 @@ export class BrowserMirror {
     // v3.1 — เลื่อน record ตามแท็บ (L14) ก่อน แล้วค่อยลบของแท็บที่ปิดเอง (L13)
     // กรอง key ที่ยังมี instance อื่นตื่นอยู่ใน liveMap — ตัวพวกนั้นแถวยังต้องมีชีวิต
     if (this.#pendingMoves.length) {
-      const moves = this.#pendingMoves.splice(0).filter(m => !live?.[m.g]?.tabs?.[m.fromKey]);
+      // v3.2 — นับ instance อื่นที่ยังใช้ URL เดิมจาก registry (liveMap ถูก rebuild หลังแท็บย้ายแล้ว → ไม่มีตัวเก่า)
+      // ถ้ามี → แถวเดิมต้องคงไว้ (count ลดเองตอน diff); ไม่มี → ลบแถวเก่าได้เลย
+      const moves = this.#pendingMoves.splice(0).filter(m => m.fromKey !== m.toKey).map(m => ({
+        ...m,
+        remaining: this.#countInstances(m.g, m.fromKey, m.tabId)
+      }));
       if (moves.length) this.#store.moveLiveTabs(moves);
     }
     if (this.#pendingDeletes.length) {

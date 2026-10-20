@@ -183,6 +183,18 @@ test("mutex: กดซ้ำขณะ restore กำลังรัน → busy"
   const chrome = harness({ windows: [{ id: 101, focused: true }] });
   const store = await storeWithIdleRecords(chrome, "งาน A", ["https://a.example/1", "https://a.example/2"]);
 
+  // Edge จริงส่ง {status:"loading"} ก่อน แล้วค่อยส่ง {url} — fake ต้อง commit URL ไม่งั้น flow ค้างรอ commit
+  const realCreate = chrome.tabs.create;
+  chrome.tabs.create = async props => {
+    const created = await realCreate(props);
+    globalThis.setTimeout(() => {
+      for (const fn of [...chrome.listeners.tabs.onUpdated]) {
+        fn(created.id, { status: "loading", url: props.url }, { ...created, url: props.url, pendingUrl: props.url });
+      }
+    }, 0);
+    return created;
+  };
+
   let releaseGate;
   const pump = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
   const engine = new RestoreEngine({
@@ -309,6 +321,41 @@ test("เบราว์เซอร์คืนแท็บมาแบบไ�
   const tab = [...chrome.__state.tabs.values()][0];
   assert.equal(tab.url, "https://a.example/1");
   assert.equal(tab.discarded, true);
+});
+
+test("v3.2: Edge ยิง {status:'loading'} ก่อน URL เข้า → ยังไม่ถือว่า commit (กัน discard ก่อนโหลด = แท็บว่าง Untitled)", async () => {
+  const chrome = harness({ windows: [{ id: 101, focused: true }] });
+  const store = await storeWithIdleRecords(chrome, "งาน A", ["https://a.example/1"]);
+  const engine = new RestoreEngine({ chrome, store, sleep: async () => {}, commitTimeoutMs: 200 });
+
+  // จำลอง Edge จริง: create → {status:"loading"} (ไม่มี url) → commit ช้ากว่านั้น {url}
+  const realCreate = chrome.tabs.create;
+  chrome.tabs.create = async props => {
+    const created = await realCreate(props);
+    const t = chrome.tabs.get ? null : null;
+    for (const fn of [...chrome.listeners.tabs.onUpdated]) {
+      fn(created.id, { status: "loading" }, { ...created, url: "", pendingUrl: props.url });
+    }
+    globalThis.setTimeout(() => {
+      for (const fn of [...chrome.listeners.tabs.onUpdated]) {
+        fn(created.id, { status: "loading", url: props.url }, { ...created, url: props.url, pendingUrl: props.url });
+      }
+    }, 30);
+    return created;
+  };
+
+  const result = await engine.openTabs({ name: "งาน A" });
+  assert.equal(result.ok, true);
+  assert.equal(result.opened, 1);
+
+  const discarded = chrome.__ops.find(o => o.fn === "tabs.discard");
+  assert.ok(discarded, "ต้อง discard หลัง URL เข้า");
+  // URL ต้องเข้าก่อน discard — ถ้า discard ก่อน commit แท็บจะว่าง ("Untitled")
+  const tabId = discarded.args?.tabId ?? discarded.args?.id;
+  const tab = await chrome.tabs.get(tabId);
+  assert.ok(tab, "ต้องมีแท็บ");
+  assert.equal(tab.discarded, true, "แท็บหลับหลัง discard");
+  assert.equal(tab.url || tab.pendingUrl, "https://a.example/1", "แท็บต้องมี URL ไม่ใช่หน้าว่าง");
 });
 
 test("ไม่เห็นสัญญาณ navigation เลย → timeout แล้ว discard ต่อ (restore ไม่ค้างกับหน้าโหลดช้า)", async () => {
