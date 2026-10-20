@@ -50,6 +50,8 @@ export class BrowserMirror {
     c.tabs.onCreated.addListener((tab) => this.#safe(() => this.handleTabCreated(tab)));
     c.tabs.onUpdated.addListener((tabId, changeInfo, tab) => this.#safe(() => this.handleTabUpdated(tabId, changeInfo, tab)));
     c.tabs.onRemoved.addListener((tabId, removeInfo) => this.#safe(() => this.handleTabRemoved(tabId, removeInfo)));
+    // Edge แทนแท็บด้วย id ใหม่ (prerender swap) — ธง r/s กับ binding ต้องเดินตาม ไม่งั้น binding หลุดเป็นแถวซ้ำ
+    c.tabs.onReplaced?.addListener?.((addedTabId, removedTabId) => this.#safe(() => this.handleTabReplaced(addedTabId, removedTabId)));
     c.tabs.onAttached.addListener((tabId, info) => this.#safe(() => this.handleTabAttached(tabId, info)));
     c.tabs.onDetached.addListener((tabId, info) => this.#safe(() => this.handleTabDetached(tabId, info)));
     c.tabGroups.onCreated.addListener((group) => this.#safe(() => this.handleGroupCreated(group)));
@@ -94,7 +96,8 @@ export class BrowserMirror {
         // → ย้าย record ตามแท็บ (L14) ไม่งั้นแถวเก่าค้างเป็น "จำไว้ (หลับ)" ซ้ำกับแท็บที่เปิดอยู่
         const bind = this.#store.liveBinding(t.id);
         const realUrl = normalizeUrl(t.url || t.pendingUrl || "");
-        if (bind && realUrl && realUrl !== bind.urlKey && !this.#store.isRestoredTab(t.id)) {
+        // v3.4 — เงื่อนไขเดียวกับ move:queued — กันเฉพาะแท็บที่ "ยังหลับจริง" (ธง s)
+        if (bind && realUrl && realUrl !== bind.urlKey && !bind.sleeping) {
           dbg("mirror", "binding:repair", { tabId: t.id, from: bind.urlKey, to: realUrl });
           this.#pendingMoves.push({ g: bind.groupName, fromKey: bind.urlKey, toKey: realUrl, tabId: t.id });
         }
@@ -184,7 +187,8 @@ export class BrowserMirror {
     if (prev && newUrl && newUrl !== prev.url) {
       const groupName = this.#groupsByGroupId.get(prev.groupId)?.name ?? "";
       const bind = this.#store.liveBinding(tabId);
-      if (bind && bind.groupName === groupName && bind.urlKey === prev.url && !this.#store.isRestoredTab(tabId)) {
+      // v3.4 — กัน move ตอนแท็บ "ยังหลับจริง" (ธง s) เท่านั้น — เดิมใช้ isRestoredTab (ธง r ไม่ถูกถอน);ตันตลอดชีวิต
+      if (bind && bind.groupName === groupName && bind.urlKey === prev.url && !bind.sleeping) {
         dbg("mirror", "move:queued", { tabId, from: prev.url, to: newUrl });
         this.#pendingMoves.push({ g: groupName, fromKey: prev.url, toKey: newUrl, tabId });
       }
@@ -212,6 +216,20 @@ export class BrowserMirror {
     if (!info) return;
     if (this.#incognitoWindows.has(info.newWindowId)) this.#forgetTab(tabId);
     void this.#resolveAndTrack(tabId);
+    this.#scheduleEmit();
+  }
+
+  /** Edge แทนแท็บด้วย id ใหม่ (prerender swap — tabs.onReplaced) — ย้าย registry/ธงก่อนเหล่า event ตามมา */
+  handleTabReplaced(addedTabId, removedTabId) {
+    if (typeof addedTabId !== "number" || typeof removedTabId !== "number" || addedTabId === removedTabId) return;
+    dbg("mirror", "tab:replaced", { from: removedTabId, to: addedTabId });
+    const entry = this.#tabsByTabId.get(removedTabId);
+    this.#store.rekeyLiveTab(removedTabId, addedTabId); // ธง r/s + binding เดินตาม id ใหม่ (ก่อน onRemoved อาจยิงตามมา)
+    if (entry) {
+      this.#tabsByTabId.delete(removedTabId);
+      this.#tabsByTabId.set(addedTabId, { ...entry });
+    }
+    void this.#resolveAndTrack(addedTabId);
     this.#scheduleEmit();
   }
 
@@ -390,9 +408,11 @@ export class BrowserMirror {
     let skippedSleeping = 0; // v3.3 — นับแท็บผลจาก restore ที่ถูกกันออกจาก liveMap (log ต่อ sync)
     for (const [tabId, entry] of this.#tabsByTabId) {
       // v3.1 L17 — แท็บผลจาก restore (ธง s ใน binding) ไม่เข้า liveMap — record ต้นทางคงหลับตาม §6
+      // v3.4 — กันรั่วช่วง binding ยังไม่ถูกสร้าง (ธง'restored' อยู่ใน store แต่ binding ยังว่างชั่วขณะ)
       // ไม่แคร์สถานะ discarded ปัจจุบัน เพราะช่วง create→discard ของ flow เอง อาจได้รับ event แบบ awake ก่อน mark
       // (มีเพียง "ผู้ใช้กดตื่นจริง" เท่านั้นที่ถอนธง s — handleTabUpdated เส้นตื่น)
-      if (this.#store.liveBinding(tabId)?.sleeping) { skippedSleeping += 1; continue; }
+      const bindLive = this.#store.liveBinding(tabId);
+      if (bindLive?.sleeping || (!bindLive && this.#store.isRestoredTab(tabId))) { skippedSleeping += 1; continue; }
       const g = this.#groupsByGroupId.get(entry.groupId);
       const name = g?.name ?? "";
       if (!name) continue; // unnamed — ไม่จับ

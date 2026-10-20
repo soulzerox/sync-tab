@@ -16,7 +16,7 @@ import { STORAGE_KEY } from "../../shared/constants.js";
  *   tabs?: Array<{ id?: number, url?: string, title?: string, favIconUrl?: string, groupId?: number, active?: boolean, pinned?: boolean }>
  * }>} [seed.windows]
  */
-export function createFakeChrome(seed = {}) {
+export function createFakeChrome(seed = {}, { discardReplacesTab = false } = {}) {
   let nextId = 1;
 
   const windows = new Map();
@@ -26,7 +26,7 @@ export function createFakeChrome(seed = {}) {
 
 
   const listeners = {
-    tabs: { onCreated: [], onUpdated: [], onRemoved: [], onMoved: [], onAttached: [], onDetached: [] },
+    tabs: { onCreated: [], onUpdated: [], onRemoved: [], onReplaced: [], onMoved: [], onAttached: [], onDetached: [] },
     tabGroups: { onCreated: [], onUpdated: [], onRemoved: [] },
     windows: { onCreated: [], onRemoved: [], onFocusChanged: [] },
     runtime: { onInstalled: [], onStartup: [] },
@@ -123,6 +123,16 @@ export function createFakeChrome(seed = {}) {
         t.discarded = true;
         t.status = "complete";
         ops.push({ fn: "tabs.discard", args: { tabId } });
+        if (discardReplacesTab) {
+          // จำลอง Edge: discard แล้วแทนแท็บด้วย id ใหม่ (prerender/onReplaced path)
+          const newId = nextId++;
+          tabs.delete(tabId);
+          const nt = { ...t, id: newId };
+          tabs.set(newId, nt);
+          for (const fn of listeners.tabs.onReplaced ?? []) fn(newId, tabId);
+          return { ...nt };
+        }
+        return { ...t };
       },
       get: async tabId => {
         const t = tabs.get(tabId);
@@ -157,6 +167,7 @@ export function createFakeChrome(seed = {}) {
       onCreated: withListener(listeners.tabs, "onCreated"),
       onUpdated: withListener(listeners.tabs, "onUpdated"),
       onRemoved: withListener(listeners.tabs, "onRemoved"),
+      onReplaced: withListener(listeners.tabs, "onReplaced"),
       onMoved: withListener(listeners.tabs, "onMoved"),
       onAttached: withListener(listeners.tabs, "onAttached"),
       onDetached: withListener(listeners.tabs, "onDetached")

@@ -29,8 +29,10 @@ export const TIMINGS = {
    * - changeInfo.url / {status:"loading"} มาก่อนเสมอ — นับผิด = discard ยกเลิกโหลดกลางทาง = แท็บว่าง/Untitled
    * - หน้าช้าไม่ตั้ง title ภายในนี้ → fallback discard (ยอมเสี่ยงบางหน้า)
    * (timeout นี้เป็น fallback — ได้ event ก่อนแล้วคืนทันที)
+   * v3.4 — 350 → 1000 → 3000 (ประสบการณ์: หน้า Cloudflare/หนัก > 1s ยังไม่มี title = Untitled)
+   * (จำกัดที่ 3000 — flow sequential ต่อแท็บ, 20 แท็บ × 5s จะกด popup ค้างนาน)
    */
-  RESTORE_COMMIT_MS: 1000,
+  RESTORE_COMMIT_MS: 3000,
   /** batch เขียน chrome.storage.local ต่อ event burst */
   SAVE_BATCH_MS: 80
 };

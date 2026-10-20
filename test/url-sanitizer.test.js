@@ -55,3 +55,11 @@ test("normalizeUrl (v3.1): ตัด tracking params — __cf_chl*, utm_*, fbcli
     "หน้าเดียวกัน ต่างเทียบ Token → key เดียว"
   );
 });
+
+test("normalizeUrl (v3.4): เรียง param — ลำดับต่างกัน = key เดียวกัน (dedupe แท็บหลับซ้ำ)", () => {
+  assert.equal(
+    normalizeUrl("https://s.com/p?b=2&a=1"),
+    normalizeUrl("https://s.com/p?a=1&b=2"),
+    "?a=1&b=2 กับ ?b=2&a=1 เป็นหน้าเดียวกัน"
+  );
+});

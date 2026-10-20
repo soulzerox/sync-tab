@@ -384,3 +384,19 @@ test("ไม่เห็นสัญญาณ navigation เลย → timeout �
   assert.equal(chrome.__ops.filter(o => o.fn === "tabs.discard").length, 1);
   assert.ok(Date.now() - t0 < 2000, "ตัว fallback ต้องเร็ว ไม่หน่วงทั้งคิว");
 });
+
+test("v3.4: แท็บ Untitled ที่ restore สร้างค้างอยู่ (url ว่าง มี binding) → เปิดรอบสอง skip ไม่ซ้ำ", async () => {
+  clearLogs();
+  const chrome = harness({ windows: [{ id: 101, focused: true, tabs: [{ id: 900, url: "", pendingUrl: "", groupId: 200, discarded: true }] }], groups: [{ id: 200, title: "งาน A", color: "blue", windowId: 101 }] });
+  const store = await storeWithIdleRecords(chrome, "งาน A", ["https://a.example/1"]);
+  // แหล่งจริง: แท็บผลจาก restore ที่ discard ก่อน commit → url/pendingUrl ว่าง แต่ binding ยังอุ้ม URL เดิม
+  store.setLiveBinding(900, { groupName: "งาน A", urlKey: "https://a.example/1" });
+  store.markRestoredTabs([900]);
+  await store.flush();
+
+  const engine = new RestoreEngine({ chrome, store, sleep: async () => {} });
+  const result = await engine.openTabs({ name: "งาน A" });
+  assert.equal(result.ok, true);
+  assert.equal(result.opened, 0, "URL นั้นมีแท็บ 'อยู่แล้ว' ผ่าน binding — ไม่สร้างซ้ำ");
+  assert.equal(result.skipped, 1);
+});

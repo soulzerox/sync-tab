@@ -444,7 +444,9 @@ export class GroupStore {
     const isMarked = this.#schema.restoredTabIds[id] === 1;
     const binding = { g: groupName, k: urlKey };
     if (prev?.r === 1 || isMarked) binding.r = 1;
-    if (prev?.s === 1 || isMarked) binding.s = 1; // ธง "แท็บที่ restore เพื่อหลับ" ติดตาม binding เดิมจนกว่าผู้ใช้กดตื่นจริง
+    // v3.4 — ธง s ยึด binding เก่า (prev.s) เท่านั้น; isMarked ใช้ตั้ง s แต่ครั้งแรกที่ binding เกิด เดิมใช้ isMarked เสมอ
+    // → ผู้ใช้กดตื่น (ธง s ถอนแล้ว) แล้วแท็บเปลี่ยนหน้า → setLiveBinding ปลูก s=1 คืน — ถูกทำให้หลับซ้ำ (อาการ dedupe ไม่ทำ)
+    if (prev?.s === 1 || (!prev && isMarked)) binding.s = 1;
     this.#schema.liveTabs[id] = binding;
     this.#scheduleSave();
   }
@@ -481,6 +483,31 @@ export class GroupStore {
 
   /** ติดธงแท็บที่ Restore flow สร้าง — ปิดแท็บเหล่านี้ = record คงอยู่ (คุ้มคลังที่ผู้ใช้ขอเก็บไว้)
    *  s=1 เพิ่ม (v3.1): แท็บถูกสร้างมาแบบ "หลับ" — mirror ไม่นับเป็นตื่นใน liveMap จนกว่าผู้ใช้กดตื่นเอง */
+  /** ย้าย binding/ธงอีก id — Edge บางครั้งแทนแท็บด้วย id ใหม่ (prerender/onReplaced, และ who knows หลัง discard) ธงต้องเดินตาม */
+  rekeyLiveTab(oldId, newId) {
+    if (!this.#schema || oldId === newId || oldId == null || newId == null) return;
+    const from = String(oldId);
+    const to = String(newId);
+    if (!from || !to || from === to) return;
+    let changed = false;
+    const binding = this.#schema.liveTabs?.[from];
+    if (binding) {
+      // ธงเดิมทั้ง r/s ย้ายไปกับ id ใหม่ — origin ป้องกัน (L13) และสถานะหลับ (L17) ยังอยู่เหมือนเดิม
+      if (!this.#schema.liveTabs[to]) { this.#schema.liveTabs[to] = { ...binding }; delete this.#schema.liveTabs[from]; changed = true; }
+    }
+    if (this.#schema.restoredTabIds?.[from] === 1) {
+      if (this.#schema.restoredTabIds[to] !== 1) {
+        this.#schema.restoredTabIds[to] = 1;
+        delete this.#schema.restoredTabIds[from];
+        changed = true;
+      }
+    }
+    if (changed) {
+      dbg("store", "rekey", { from, to });
+      this.#scheduleSave();
+    }
+  }
+
   markRestoredTabs(tabIds) {
     if (!this.#schema || !Array.isArray(tabIds)) return;
     dbg("store", "markRestored", { ids: tabIds });

@@ -89,6 +89,9 @@ export class RestoreEngine {
       for (const t of windowTabs) {
         const norm = normalizeUrl(t.url || t.pendingUrl || "");
         if (norm) openUrls.add(norm);
+        // v3.4 — แท็บ Untitled ที่ restore สร้างเอง (url/pendingUrl ว่าง) ก็รู้เจ้าของผ่าน binding — ไม่งั้นกดเปิดรอบสอง = สร้างแท็บซ้ำ
+        const bind = this.#store.liveBinding(t.id);
+        if (bind?.urlKey) openUrls.add(bind.urlKey);
       }
 
       // กลุ่มที่มีชีวิตชื่อเดียวกันอยู่ในหน้าต่างเป้าหมาย? (เทียบชื่อแบบ exact)
@@ -139,24 +142,31 @@ export class RestoreEngine {
 
         // กันแท็บว่าง "Untitled" — commit จริงคือ title ถูกตั้ง/โหลดเสร็จ (ดู #ensureCommitListener)
         const commit = await this.#waitForCommit(created.id, sinceTick);
+        let activeTabId = created.id; // v3.4 — defensive: ถ้าเบราว์เซอร์แทนแท็บด้วย id ใหม่ ธงต้องเดินตาม
         const discardResult = await this.#chrome.tabs.discard(created.id);
+        if (discardResult && typeof discardResult.id === "number" && discardResult.id !== created.id) {
+          this.#store.rekeyLiveTab(created.id, discardResult.id);
+          createdIds.push(discardResult.id);
+          activeTabId = discardResult.id;
+          dbg("restore", "tab:id-changed", { from: created.id, to: discardResult.id });
+        }
 
         // ตรวจซ้ำหลัง discard: ถ้าเบราว์เซอร์ทำ URL หลุด (ไม่มี url/pendingUrl ทั้งคู่) — ตั้งกลับให้เป็นแผนสุดท้าย
         let urlRestored = false;
         try {
-          const finalTab = await this.#chrome.tabs.get(created.id);
+          const finalTab = await this.#chrome.tabs.get(activeTabId);
           // v3.2 — ตรวจทั้ง url และ pendingUrl (Edge อาจมีแค่อันเดียวตอนนั้น)
           if (finalTab && isIgnoredUrl(finalTab.url || "") && isIgnoredUrl(finalTab.pendingUrl || "")) {
-            await this.#chrome.tabs.update(created.id, { url: entry.url });
+            await this.#chrome.tabs.update(activeTabId, { url: entry.url });
             urlRestored = true;
           }
           dbg("restore", "tab:done", {
-            id: created.id, url: entry.url, commit, waitMs: Date.now() - t0,
+            id: activeTabId, url: entry.url, commit, waitMs: Date.now() - t0,
             discardResult, urlRestored, finalUrl: finalTab?.url || "", finalPending: finalTab?.pendingUrl || "",
             discarded: Boolean(finalTab?.discarded), status: finalTab?.status
           });
         } catch (err) {
-          dbg("restore", "tab:gone", { id: created.id, error: String(err?.message ?? err) }); // แท็บหายไปแล้ว — ไม่มีอะไรจะกู้
+          dbg("restore", "tab:gone", { id: activeTabId, error: String(err?.message ?? err) }); // แท็บหายไปแล้ว — ไม่มีอะไรจะกู้
         }
 
         opened += 1;

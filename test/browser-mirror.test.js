@@ -606,3 +606,79 @@ test("L17: reconcile prune ไม่ตัด binding/ธงของแท็�
   await mirror.reconcile(); // รอบเดียวพอ — reconcile รอบถัดไป prune id 999 (ไม่อยู่ใน windows)
   assert.equal(store.liveBinding(999), null, "prune เฉพาะแท็บที่หายไปจริง");
 });
+
+// ------------------------------------------------------------------
+// v3.4 — ตามข้อสังเกตผู้ใช้: Edge บางครั้งแทนแท็บด้วย id ใหม่ (onReplaced),
+// แท็บผลจาก restore ที่ "user กดตื่นแล้ว" ต้องเลื่อน record ได้เหมือนแท็บปกติ (เดิม isRestoredTab ตัน),
+// และ buildLiveMap ต้องไม่รั่วแท็บ restore ที่ยังไม่มี binding เข้า liveMap
+// ------------------------------------------------------------------
+
+test("v3.4: onReplaced (Edge แทนแท็บด้วย id ใหม่) → binding + ธง r/s เดินตาม id ใหม่", async () => {
+  const chrome = createFakeChrome({
+    windows: [{ id: 101, focused: true, groups: [{ id: 100, title: "งาน T", color: "blue" }], tabs: [{ id: 113, url: "", pendingUrl: "https://t/1", groupId: 100 }] }]
+  }, { discardReplacesTab: true });
+  let time = 1_000;
+  const store = new GroupStore({ storage: chrome.storage.local, now: () => ++time, saveDelayMs: 0 });
+  const mirror = new BrowserMirror({ chrome, store, emitDebounceMs: 0 });
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 100, title: "งาน T", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 113, url: "", groupId: 100, windowId: 101 }), pendingUrl: "https://t/1" });
+  store.markRestoredTabs([113]);
+  mirror.flushSync();
+  assert.equal(store.liveBinding(113)?.sleeping, true, "ก่อน discard = มาจาก restore");
+
+  // Edge: discard กลืน id เก่า → ยิง onReplaced(new, old)
+  const newTab = await chrome.tabs.discard(113);
+  assert.notEqual(newTab.id, 113, "fake ในโหมด discardReplacesTab ต้องคืน id ใหม่");
+  await new Promise(r => globalThis.setTimeout(r, 0)); // ให้ #safe/#scheduleEmit เจอ
+  mirror.flushSync();
+
+  assert.equal(store.liveBinding(113), null, "binding เก่าไม่ควรค้าง");
+  const moved = store.liveBinding(newTab.id);
+  assert.ok(moved, "binding ต้องเดินตาม id ใหม่");
+  assert.equal(moved.urlKey, "https://t/1");
+  assert.equal(moved.restored, true, "ธง r เดินตาม (ปิดทีหลัง = record คงอยู่ L13)");
+  assert.equal(moved.sleeping, true, "ธง s เดินตาม — ไม่งั้นแท็บเพิ่ง discard กลายเป็นตื่น (อาการ 'บอก alive' ที่ผู้ใช้เจอ)");
+});
+
+test("v3.4: แท็บผลจาก restore ที่ผู้ใช้กดตื่น เปลี่ยนหน้า → record เลื่อนตาม (ไม่ค้างแถวซ้ำเป็นคู่หลับ)", async () => {
+  const { store, mirror, chrome } = harness({
+    windows: [{ id: 101, focused: true, groups: [{ id: 100, title: "งาน Q", color: "blue" }], tabs: [{ id: 112, url: "https://q/1", groupId: 100, discarded: true }] }]
+  });
+  await store.init();
+  seedIdleRecord(store, "งาน Q", "https://q/1");
+  store.markRestoredTabs([112]);
+  await mirror.reconcile();
+  assert.equal(store.liveBinding(112)?.sleeping, true, "แท็บหลับหลัง restore");
+
+  // ผู้ใช้กดตื่น (onUpdated discarded=false หลัง discard) — ธง s ถอน แล้วแท็บ redirect ไปหน้าอื่น
+  mirror.handleTabUpdated(112, { status: "loading" }, { ...tabEvent({ id: 112, url: "https://q/1", groupId: 100, windowId: 101, discarded: false }) });
+  mirror.handleTabUpdated(112, { url: "https://q/2", status: "loading" }, { ...tabEvent({ id: 112, url: "https://q/2", groupId: 100, windowId: 101 }) });
+  mirror.flushSync();
+  await store.flush();
+
+  const tabs = store.snapshot().groups["งาน Q"].tabs;
+  // L14 — record เลื่อนตามแท็บ: แถว q/1 (จำไว้) ที่แท็บตื่นแล้วเลือกเอง ต้องเปลี่ยนเป็น q/2 (แท็บกำลังใช้)
+  // แท็บเดียวถือเจ้าของเดียว — เดิมขึ้นค้าง q/1 หลับ + q/2 ตื่น เป็นคู่ซ้ำ (อาการ dedupe ไม่ทำ ที่ผู้ใช้เจอ)
+  assert.deepEqual(Object.keys(tabs), ["https://q/2"], "record เลื่อนตาม (ไม่ควรค้างคู่ซ้ำ)");
+  assert.equal(tabs["https://q/2"].liveCount, 1, "แถว q/2 = แท็บที่ตื่นจริง");
+  assert.equal(store.liveBinding(112)?.urlKey, "https://q/2", "binding เดินตาม URL จริงของแท็บ");
+});
+
+test("v3.4: buildLiveMap ไม่รั่วแท็บที่ mark แล้วแต่ binding ยังไม่เคยถูกสร้าง (เป็นตื่นช่วง create→discard)", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  // แหล่งจริง: restore markRestoredTabs(id) → event มาก่อน binding ถูก setLiveBinding (ระหว่าง group/สร้างแถว)
+  store.markRestoredTabs([130]);
+  mirror.handleGroupCreated({ id: 300, title: "งาน V", color: "blue", windowId: 101 });
+  // จำลอง event แบบไม่อิง binding: tryRegisterTab จะ setLiveBinding ตาม isMarked — ผลคือต้องหลับไม่ใช่ตื่น
+  mirror.handleTabCreated({ ...tabEvent({ id: 130, url: "", groupId: 300, windowId: 101 }), pendingUrl: "https://v/p" });
+  mirror.flushSync();
+
+  const tabs = store.snapshot().groups["งาน V"]?.tabs ?? {};
+  assert.ok(!tabs["https://v/p"], "restore เพื่อหลับ — ห้ามโผล่เป็นแถวตื่นระหว่าง create→discard");
+});

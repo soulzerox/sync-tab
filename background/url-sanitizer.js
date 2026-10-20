@@ -85,6 +85,8 @@ export function normalizeUrl(url, stripTracking = true) {
       for (const key of keysToDelete) {
         searchParams.delete(key);
       }
+      // v3.4 — เรียง param ให้ ?a=1&b=2 กับ ?b=2&a=1 เป็น key เดียวกัน (dedupe แท็บหลับซ้ำ)
+      searchParams.sort();
 
       parsed.search = searchParams.toString() ? `?${searchParams.toString()}` : "";
     }
