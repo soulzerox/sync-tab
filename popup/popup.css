@@ -133,6 +133,9 @@ summary::-webkit-details-marker{ display:none }
 .btn:disabled{ opacity:.45; cursor:not-allowed }
 .btn:disabled:hover{ border-color:var(--border-strong); color:var(--text) }
 .btn.ghost-danger{ margin-left:auto; padding:6px 8px; color:var(--muted) }
+.btn.danger-sel{ color:var(--danger); border-color:color-mix(in srgb, var(--danger) 35%, transparent); padding:6px 10px }
+.btn.danger-sel:hover{ background:color-mix(in srgb, var(--danger) 14%, transparent); color:var(--danger); border-color:var(--danger) }
+.btn[hidden]{ display:none }
 .btn.ghost-danger:hover{ color:var(--danger); border-color:color-mix(in srgb, var(--danger) 40%, transparent);
                          background:color-mix(in srgb, var(--danger) 10%, transparent) }
 .btn svg{ width:13px; height:13px; stroke:currentColor }

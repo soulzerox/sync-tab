@@ -20,7 +20,7 @@
 | **Restore** | การเปิดแท็บจำไว้กลับเข้า browser ตามคำสั่งผู้ใช้: เติมเข้า Live group ชื่อเดียวกัน หรือสร้างกลุ่มใหม่ในหน้าต่างเป้าหมาย | sync (คำเก่า), recover, reopen |
 | **เปิดแบบหลับ / Sleeping Tab** | แท็บที่ถูก create → จัดกลุ่ม → `tabs.discard()`: โชว์ favicon/title แต่ไม่โหลดเนื้อหาจนกว่าจะถูกคลิก | lazy load, suspended (คำเก่า), sleeping ใน Edge UI ✓ |
 | **Trans group** | กลุ่มที่ถูกสร้างบน browser แล้วถูกปิดทิ้งไปก่อนจะมีแท็บ web ตัวจริงอย่างน้อย 1 — ไม่เข้าคลัง (L9) | "กลุ่มว่าง" |
-| **Normalized URL** | URL ที่ผ่าน url-sanitizer: ฟิลเตอร์ scheme พิเศษและทำรูปแบบให้เทียบเท่ากัน — ฐานให้ dedupe ของ record | ตัด utm (ไม่ทำ — การสันดาปพารามิเตอร์ติดตามเป็น feature ของระบบเก่าที่ถูกถอด) |
+| **Normalized URL** | URL ที่ผ่าน url-sanitizer: ฟิลเตอร์ scheme พิเศษและทำรูปแบบให้เทียบเท่ากัน — host ตัวเล็ก, ตัด trailing slash, **ตัด fragment `#hash` ทิ้ง (v3.0.1: หน้าเดียวกัน hash ต่างกัน = record เดียวกัน)** — ฐานให้ dedupe ของ record | ตัด utm (ไม่ทำ — การสันดาปพารามิเตอร์ติดตามเป็น feature ของระบบเก่าที่ถูกถอด) |
 | **Full rescan** | คำสั่งผู้ใช้ (Alt+Shift+S) เรียก reconcile รอบใหม่ด้วยตนเอง | auto scan, alarm (มีเฉพาะ event-driven) |
 
 ## ประวัติการถอดรื้อ (สั้น)

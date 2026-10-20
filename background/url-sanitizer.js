@@ -54,7 +54,9 @@ export function isBlacklistedUrl(url, blacklistDomains = []) {
 
 /**
  * Normalizes a URL for comparison and storage.
- * Standardizes protocol, hostname lowercase, strips trailing slash, and strips marketing tracking parameters.
+ * Standardizes protocol, hostname lowercase, strips trailing slash, strips URL fragment (#hash),
+ * and (legacy path) marketing tracking parameters.
+ * v3 dedupe rule: หน้าเดียวกันเปิดพร้อม fragment ต่างกัน (เช่น #สถิติรายได้) = record เดียวกัน
  * @param {string} url
  * @param {boolean} [stripTracking=true]
  * @returns {string}
@@ -65,6 +67,9 @@ export function normalizeUrl(url, stripTracking = true) {
 
   try {
     const parsed = new URL(trimmed);
+
+    // ตัด fragment #hash ทิ้งเสมอ — ฐาน dedupe คือ "หน้า" ไม่ใช่ตำแหน่ง scroll และแท็กฝั่งเว็บ
+    parsed.hash = "";
 
     if (stripTracking && parsed.search) {
       const searchParams = new URLSearchParams(parsed.search);

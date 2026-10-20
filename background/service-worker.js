@@ -97,6 +97,15 @@ async function handleMessage(msg) {
       return { ok: true };
     }
 
+    case MSG.DELETE_TABS: {
+      await ensureStoreReady();
+      const { groupName, urls } = msg.payload ?? {};
+      if (typeof groupName !== "string" || !Array.isArray(urls)) return { ok: false, error: "bad-payload" };
+      const result = store.deleteTabs(groupName, urls);
+      await store.flush();
+      return { ok: true, ...result };
+    }
+
     case MSG.RENAME_GROUP: {
       await ensureStoreReady();
       const { groupName, newName } = msg.payload ?? {};

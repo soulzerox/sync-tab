@@ -301,3 +301,95 @@ test("markScan ตั้ง lastScanAt (สำหรับ footer 'ซิงก�
   await store.flush();
   assert.ok(store.snapshot().lastScanAt > 0);
 });
+
+// ------------------------------------------------------------------
+// v3.0.1 — dedupe fragment (#hash): renormalize migration + bulk delete
+// ------------------------------------------------------------------
+
+test("renormalize migration: init ยก key ติด fragment และ merge ฝาแฝดให้เป็น record เดียว", async () => {
+  const KEY = "https://novelkingdom.co/writer";
+  const HASH_KEY = `${KEY}#%E0%B8%AA%E0%B8%96%E0%B8%B4%E0%B8%95%E0%B8%B4`;
+  const seed = {
+    [STORAGE_KEY]: {
+      version: 3,
+      groups: {
+        "งานเขียน": {
+          name: "งานเขียน",
+          color: "blue",
+          createdAt: 10,
+          updatedAt: 10,
+          liveWindowIds: [],
+          tabs: {
+            [KEY]: { url: KEY, title: "ฐาน", favIconUrl: "a.png", addedAt: 500, lastLiveAt: 500, closedAt: 900, liveCount: 0, order: 1 },
+            [HASH_KEY]: { url: HASH_KEY, title: "พร้อมแท็ก", favIconUrl: "", addedAt: 300, lastLiveAt: 300, closedAt: 950, liveCount: 0, order: 2 }
+          }
+        }
+      }
+    }
+  };
+  const { store } = createStore(seed);
+  await store.init();
+
+  const g = store.getGroups()["งานเขียน"];
+  assert.deepEqual(Object.keys(g.tabs), [KEY], "รวมเป็น key เดียวตาม normalized URL");
+  const t = g.tabs[KEY];
+  assert.equal(t.addedAt, 300, "addedAt เอ็งเก่าสุด");
+  assert.equal(t.closedAt, 950, "closedAt เอ็งใหม่สุดจากฝาแฝด");
+  assert.equal(t.title, "ฐาน", "คงข้อมูลฝั่ง key ปกติเป็นใหญ่");
+  assert.equal(t.order, 1);
+  assert.equal(t.url, KEY);
+});
+
+test("renormalize migration: key hash โดด (ไม่มีฝาแฝด) → ได้ key ใหม่ + url ตาม key; boot ซ้ำ idempotent", async () => {
+  const KEY = "https://solo.example/page";
+  const seed = {
+    [STORAGE_KEY]: {
+      version: 3,
+      groups: {
+        s: {
+          name: "s", color: "grey", createdAt: 1, updatedAt: 1, liveWindowIds: [],
+          tabs: { [`${KEY}#frag`]: { url: `${KEY}#frag`, title: "หน้า", favIconUrl: "", addedAt: 7, lastLiveAt: 7, closedAt: 8, liveCount: 0, order: 0 } }
+        }
+      }
+    }
+  };
+  const { store, storage } = createStore(seed);
+  await store.init();
+  await store.flush();
+
+  const snap = store.snapshot();
+  assert.deepEqual(Object.keys(snap.groups.s.tabs), [KEY]);
+  assert.equal(snap.groups.s.tabs[KEY].url, KEY);
+  assert.equal(snap.groups.s.tabs[KEY].addedAt, 7);
+  assert.deepEqual(storage.data.get(STORAGE_KEY), snap, "ผล renormalize ถูก persist จริง");
+
+  // boot รอบใหม่ด้วยข้อมูลเดิม — key ไม่ถูกยุ่งเพิ่ม (idempotent)
+  const store2 = new GroupStore({ storage, now: () => 999, saveDelayMs: 0, setTimeoutFn: setTimeout, clearTimeoutFn: clearTimeout });
+  await store2.init();
+  await store2.flush();
+  assert.deepEqual(store2.snapshot().groups.s.tabs, snap.groups.s.tabs);
+});
+
+test("deleteTabs: ลบหลายรายการพร้อมกัน — dedupe input, normalize ก่อนจับคู่ key, GC กลุ่มว่าง (L8)", async () => {
+  const { store } = createStore();
+  await store.init();
+  store.applyLiveMap(live("w", { tabs: { ...liveTab("https://a.com/x"), ...liveTab("https://b.com/y"), ...liveTab("https://c.com/z") } }));
+  await store.flush();
+
+  const res = store.deleteTabs("w", ["https://a.com/x", "https://a.com/x", "https://b.com/y#frag"]);
+  assert.deepEqual(res, { removed: 2, groupDeleted: false });
+  assert.deepEqual(Object.keys(store.getGroups().w.tabs), ["https://c.com/z"]);
+
+  const res2 = store.deleteTabs("w", ["https://c.com/z"]);
+  assert.deepEqual(res2, { removed: 1, groupDeleted: true });
+  assert.deepEqual(store.getGroups(), {});
+});
+
+test("deleteTabs: payload ไม่ถูกต้องหรือกลุ่มไม่มีจริง → ไม่โยน, คืน removed=0", async () => {
+  const { store } = createStore();
+  await store.init();
+  store.applyLiveMap(live("w", { tabs: liveTab("https://a.com/x") }));
+  await store.flush();
+  assert.deepEqual(store.deleteTabs("w", null), { removed: 0, groupDeleted: false });
+  assert.deepEqual(store.deleteTabs("no-such-group", ["https://a.com/x"]), { removed: 0, groupDeleted: false });
+});

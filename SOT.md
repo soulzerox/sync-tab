@@ -118,11 +118,11 @@ flowchart TD
 
 | โมดูล | ความรับผิดชอบ | Interface (หลังเขียน) |
 |---|---|---|
-| `background/group-store.js` | คลังกลุ่ม: diff projection จาก liveMap, live/idle flips, rename rekey+union merge, deleteTab + empty-group GC (L8), persist (debounce 80ms batch + `flush()`) | `init()`, `snapshot()`, `getGroups()`, `applyLiveMap(liveMap, {markScan})`, `renameGroup(oldName, newName)`, `deleteGroup(name)`, `deleteTab(name, url)`, `setTheme(t)`, `markScan()`, `markMigrationNotice()`, `consumeMigrationNotice()`, `themePreference`, `ready`, `migrated`, `flush()` |
+| `background/group-store.js` | คลังกลุ่ม: diff projection จาก liveMap, live/idle flips, rename rekey+union merge, deleteTab/deleteTabs (bulk; input ผ่าน normalize + dedupe) + empty-group GC (L8), init ยก key ติด fragment (#hash) ให้เป็น normalized key + merge ตัวซ้ำ (v3.0.1 dedupe), persist (debounce 80ms batch + `flush()`) | `init()`, `snapshot()`, `getGroups()`, `applyLiveMap(liveMap, {markScan})`, `renameGroup(oldName, newName)`, `deleteGroup(name)`, `deleteTab(name, url)`, `deleteTabs(name, urls)`, `setTheme(t)`, `markScan()`, `markMigrationNotice()`, `consumeMigrationNotice()`, `themePreference`, `ready`, `migrated`, `flush()` |
 | `background/browser-mirror.js` | รับ chrome event → เก็บ session registries (groupId↔{windowId,name,color}, tabId↔data) → rebuild liveMap → เรียก `applyLiveMap`; rename ระหว่าง event เรียก `store.renameGroup` ก่อน (L7), reconcile/rescan อ่านสถานะจริงทั้งชุด (ตัด incognito/unnamed/privileged) | `attach() → Promise` (ลง listeners แบบ sync + reconcile), `reconcile()`, `handle{TabCreated,TabUpdated,TabRemoved,TabAttached,TabDetached,GroupCreated,GroupUpdated,GroupRemoved,WindowRemoved}(...)`, `flushSync()` |
 | `background/restore-engine.js` | opener: หา window เป้าหมาย + existing live group; diff ตาม L11; create → group → update(color เฉพาะกลุ่มใหม่) → discard แบบ staggered (120ms) + per-name mutex + เช็ค window ยังอยู่หลังทุก sleep | `openTabs({name, urls}) → {ok, opened, skipped, createdWindow} \| {ok:false, error}` |
 | `background/url-sanitizer.js` | (คงเดิมจาก v2) normalize URL, ตัดพารามิเตอร์เชิงทำงาน, filter privileged scheme | คงเดิม |
-| `background/service-worker.js` | จุดเกิด event: `tabs.onCreated/onUpdated/onRemoved/onAttached/onDetached`, `tabGroups.onCreated/onUpdated/onRemoved`, `windows.onRemoved`, `runtime.onInstalled/onStartup` + message router (MSG.GET_STATE/OPEN_TABS/DELETE_GROUP/DELETE_TAB/RENAME_GROUP/SET_THEME); rename จาก popup → `store.renameGroup` + `tabGroups.update` (สองทาง L7) | — |
+| `background/service-worker.js` | จุดเกิด event: `tabs.onCreated/onUpdated/onRemoved/onAttached/onDetached`, `tabGroups.onCreated/onUpdated/onRemoved`, `windows.onRemoved`, `runtime.onInstalled/onStartup` + message router (MSG.GET_STATE/OPEN_TABS/DELETE_GROUP/DELETE_TAB/DELETE_TABS/RENAME_GROUP/SET_THEME); rename จาก popup → `store.renameGroup` + `tabGroups.update` (สองทาง L7) | — |
 | `popup/popup.{html,css,js}` | Pure view: render state, selection,จัดเรียงการ์ด, ส่ง intent RPC, toast, empty-state, theme toggle | — |
 | `shared/` | `constants.js` (timings, 9 colors), `types.js`, `messages.js` | — |
 
@@ -138,6 +138,7 @@ export type ExtensionMessage =
   | { type: "OPEN_TABS"; payload: { groupName: string; urls: string[] } }  // [] = เปิดทั้งหมด (หลับเท่านั้น)
   | { type: "DELETE_GROUP"; payload: { groupName: string } }
   | { type: "DELETE_TAB"; payload: { groupName: string; url: string } }
+  | { type: "DELETE_TABS"; payload: { groupName: string; urls: string[] } }  // ลบหลายแท็บจากคลัง (normalize + dedupe ภายใน store; browser ไม่ถูกแตะ)
   | { type: "RENAME_GROUP"; payload: { groupName: string; newName: string } }
   | { type: "SET_THEME"; payload: { theme: "dark" | "light" | "auto" } };
 ```

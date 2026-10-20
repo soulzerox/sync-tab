@@ -214,6 +214,14 @@ function buildCard(name, record) {
   selBtn.textContent = "เปิดที่เลือก (0)";
   selBtn.addEventListener("click", () => openTabs(name, selectedUrls(details, true)));
 
+  const delSelBtn = document.createElement("button");
+  delSelBtn.className = "btn danger-sel";
+  delSelBtn.hidden = true;
+  delSelBtn.setAttribute("aria-label", `ลบแท็บที่เลือกออกจากกลุ่ม ${name}`);
+  delSelBtn.title = "ลบแท็บที่จำไว้ที่เลือก (แท็บบนเบราว์เซอร์ไม่ถูกแตะ)";
+  delSelBtn.textContent = "ลบที่เลือก (0)";
+  delSelBtn.addEventListener("click", () => deleteTabsSelected(name, collectedSelection(details)));
+
   const allBtn = document.createElement("button");
   allBtn.className = "btn primary";
   allBtn.textContent = `เปิดทั้งหมด ${idleCount}`;
@@ -227,14 +235,16 @@ function buildCard(name, record) {
   delBtn.innerHTML = svg(ICONS.trash);
   delBtn.addEventListener("click", () => deleteGroup(name, windowCount > 0));
 
-  acts.append(selBtn, allBtn, delBtn);
+  acts.append(selBtn, delSelBtn, allBtn, delBtn);
   details.append(acts);
 
-  // เปลี่ยนของ checkbox → ปุ่มเปิดที่เลือก
+  // เปลี่ยนของ checkbox → ปุ่มเปิดที่เลือก + ลบที่เลือก
   details.addEventListener("change", () => {
     const n = collectedSelection(details).length;
     selBtn.disabled = n === 0;
     selBtn.textContent = `เปิดที่เลือก (${n})`;
+    delSelBtn.hidden = n === 0;
+    delSelBtn.textContent = `ลบที่เลือก (${n})`;
   });
 
   return details;
@@ -351,6 +361,17 @@ async function deleteTab(groupName, url, title) {
   }
   render();
   toast(`ลบแล้ว "${title}"`);
+}
+
+/** ลบแท็บที่จำไว้หลายรายการที่ tick ไว้ (IDLE เท่านั้น — แท็บตื่นไม่ถูกเลือกได้อยู่แล้ว) */
+async function deleteTabsSelected(groupName, urls) {
+  if (urls.length === 0) return;
+  const ok = window.confirm(`ลบแท็บที่จำไว้ ${urls.length} รายการออกจากคลัง "${groupName}"?\n(แท็บบนเบราว์เซอร์ไม่ถูกแตะ)`);
+  if (!ok) return;
+  const response = await send({ type: MSG.DELETE_TABS, payload: { groupName, urls } });
+  if (!response?.ok) { toast(`ลบไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true }); return; }
+  await refresh();
+  toast(`ลบแท็บที่จำไว้ ${response.removed ?? urls.length} รายการแล้ว`);
 }
 
 function startRename(summaryEl, renameBtn, groupName) {

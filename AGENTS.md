@@ -4,7 +4,7 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 
 ## Layout
 - `manifest.json` — MV3 manifest, permissions: `tabs`, `tabGroups`, `storage`, `unlimitedStorage`
-- `background/service-worker.js` — wires chrome listeners synchronously (mirror), message router for the 6 RPC types
+- `background/service-worker.js` — wires chrome listeners synchronously (mirror), message router for the 7 RPC types
 - `background/browser-mirror.js` — chrome events → in-memory registries → liveMap → GroupStore
 - `background/group-store.js` — the single state seam (storage projection, schema v3, debounced persist + `flush()`)
 - `background/restore-engine.js` — restore flow: diff → create → group → setColor → discard, staggered + mutex
@@ -12,6 +12,7 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 - `popup/` — popup UI (html/css/js; tokens in `design-system/synctab/pages/popup.md`)
 - `shared/` — `constants.js` (schema/keys/timings), `messages.js` (MSG RPC + theme values), `types.js` (JSDoc), `ui-utils.js` (pure popup helpers)
 - `test/` — `node --test` suites with the shared fake-chrome harness (`test/fake-chrome.js`)
+- `icons/` + `scripts/make-icons.py` — extension icons (16/32/48/128) regenerated from a 512px master (python3 + Pillow, concept: grouped tab stack with live dot)
 - `SOT.md` / `CONTEXT.md` / `PRODUCT.md` / `docs/` — spec, glossary, product note, ADR + history
 
 ## Conventions

@@ -93,6 +93,8 @@ export class GroupStore {
         await this.#storage.remove(LEGACY_STORAGE_KEYS);
         migrated = true;
       }
+      // v3.0.1 — key คลังเดิมอาจยังติด fragment (#hash): ยก key ใหม่ + รวมตัวซ้ำ
+      this.#renormalizeStoredTabs();
     } else {
       // อะไรก็ตามที่ไม่ใช่ v3 — ล้างทั้ง area แล้วสร้าง schema ใหม่ (ระบบเก่าไม่ import)
       this.#schema = { version: SCHEMA_VERSION, groups: {}, themePreference: undefined, lastScanAt: undefined, migrationNoticeAt: undefined, migrationAckAt: undefined };
@@ -333,17 +335,73 @@ export class GroupStore {
 
   /** ลบแท็บรายตัว (record idle — แท็บตื่นไม่รับลบจาก popup ฝั่ง mirror กรอง) */
   deleteTab(name, url) {
+    return this.deleteTabs(name, [url]);
+  }
+
+  /**
+   * ลบแท็บในคลังหลายรายการในครั้งเดียว (input = recorded key หรือ raw url — normalize ก่อนจับคู่ key,
+   * แท็บจริงบนเบราว์เซอร์ไม่ถูกแตะ) — GC กลุ่มว่างตาม L8; คืน { removed, groupDeleted }
+   */
+  deleteTabs(name, urls) {
     const record = this.#schema.groups[name];
-    if (!record) return;
-    const key = normalizeUrl(url) || url;
-    if (!(key in record.tabs)) return;
-    delete record.tabs[key];
+    if (!record || !Array.isArray(urls)) return { removed: 0, groupDeleted: false };
+
+    let removed = 0;
+    for (const url of new Set(urls.map(String))) {
+      const key = normalizeUrl(url) || String(url);
+      if (key in record.tabs) {
+        delete record.tabs[key];
+        removed += 1;
+      }
+    }
+    if (removed === 0) return { removed: 0, groupDeleted: false };
+
     record.updatedAt = this.#now();
+    let groupDeleted = false;
     // L8 — ถ้าไม่มีแท็บเหลือเลย ลบกลุ่มทิ้ง (ไม่มีค่าให้จำ)
     if (Object.keys(record.tabs).length === 0) {
       delete this.#schema.groups[name];
+      groupDeleted = true;
     }
     this.#scheduleSave();
+    return { removed, groupDeleted };
+  }
+
+  /**
+   * v3.0.1 — ยก key แท็บให้ตรง normalize ปัจจุบัน (ตัด fragment #hash) แล้วรวมรายการซ้ำเข้า key เดิม
+   * แก้ปัญหา "หน้าเดียวกัน hash ต่างกัน ถูกจำแยกกัน" — ฐาน dedupe คือ Normalized URL
+   * idempotent: key ที่ normalize แล้วจะเข้าเงื่อนไขไม่ได้อีก (boot รอบถัดไปเงียบ)
+   * @returns {boolean} true เมื่อข้อมูลเปลี่ยน
+   */
+  #renormalizeStoredTabs() {
+    let changed = false;
+    for (const record of Object.values(this.#schema.groups)) {
+      for (const [key, tab] of Object.entries(record.tabs)) {
+        const norm = normalizeUrl(key) || key;
+        if (norm === key) continue;
+
+        changed = true;
+        delete record.tabs[key];
+        const twin = record.tabs[norm];
+        record.tabs[norm] = twin
+          ? {
+              // รวมข้อมูล: เก็บฝั่ง key ปกติเป็นใหญ่ เติมเฉพาะช่องที่ฝั่งนั้นว่าง
+              ...twin,
+              favIconUrl: twin.favIconUrl || tab.favIconUrl,
+              title: twin.title || tab.title,
+              addedAt: Math.min(twin.addedAt ?? tab.addedAt ?? 0, tab.addedAt ?? twin.addedAt ?? 0),
+              lastLiveAt: Math.max(twin.lastLiveAt ?? 0, tab.lastLiveAt ?? 0),
+              closedAt: twin.closedAt && tab.closedAt ? Math.max(twin.closedAt, tab.closedAt) : (twin.closedAt ?? tab.closedAt),
+              liveCount: Math.max(twin.liveCount, tab.liveCount),
+              order: Math.min(twin.order ?? tab.order ?? 0, tab.order ?? twin.order ?? 0)
+            }
+          : { ...tab, url: norm };
+        record.updatedAt = this.#now();
+      }
+    }
+    // แท็บถูก "ย้าย" ไม่ใช่ "ลบ" — กลุ่มว่างไม่เกิดขึ้นจาก merge ข้าม GC
+    if (changed) this.#scheduleSave();
+    return changed;
   }
 
   /** ปัดค่าเวลา scan ล่าสุด (ธง footer ของ popup) */
