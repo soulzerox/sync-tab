@@ -408,7 +408,22 @@ export class GroupStore {
     if (!this.#schema) return null;
     const b = this.#schema.liveTabs?.[String(tabId)];
     if (!b?.g || !b?.k) return null;
-    return { groupName: b.g, urlKey: b.k, restored: Boolean(b.r) };
+    return { groupName: b.g, urlKey: b.k, restored: Boolean(b.r), sleeping: Boolean(b.s) };
+  }
+
+  /** แท็บนี้เป็นผลจาก restore flow หรือไม่ (ธง restoredTabIds — ใช้ระหว่างช่วง create→discard ของ flow เอง) */
+  isRestoredTab(tabId) {
+    return Boolean(this.#schema && this.#schema.restoredTabIds?.[String(tabId)] === 1);
+  }
+
+  /** ผู้ใช้กดตื่นแท็บที่เคยถูก restore เอง — ถอนธง s (ตื่นแล้วนับตามจริง; ธง r คงอยู่เพื่อ L13) */
+  clearSleepingFlag(tabId) {
+    if (!this.#schema) return;
+    const binding = this.#schema.liveTabs?.[String(tabId)];
+    if (binding && binding.s === 1) {
+      delete binding.s;
+      this.#scheduleSave();
+    }
   }
 
   /** เขียน/อัปเดต binding — ธง r (origin ป้องกัน) ติดค้างจาก binding เดิม/restoredTabIds เสมอ */
@@ -420,6 +435,7 @@ export class GroupStore {
     const isMarked = this.#schema.restoredTabIds[id] === 1;
     const binding = { g: groupName, k: urlKey };
     if (prev?.r === 1 || isMarked) binding.r = 1;
+    if (prev?.s === 1 || isMarked) binding.s = 1; // ธง "แท็บที่ restore เพื่อหลับ" ติดตาม binding เดิมจนกว่าผู้ใช้กดตื่นจริง
     this.#schema.liveTabs[id] = binding;
     this.#scheduleSave();
   }
@@ -454,7 +470,8 @@ export class GroupStore {
     return changed;
   }
 
-  /** ติดธงแท็บที่ Restore flow สร้าง — ปิดแท็บเหล่านี้ = record คงอยู่ (คุ้มคลังที่ผู้ใช้ขอเก็บไว้) */
+  /** ติดธงแท็บที่ Restore flow สร้าง — ปิดแท็บเหล่านี้ = record คงอยู่ (คุ้มคลังที่ผู้ใช้ขอเก็บไว้)
+   *  s=1 เพิ่ม (v3.1): แท็บถูกสร้างมาแบบ "หลับ" — mirror ไม่นับเป็นตื่นใน liveMap จนกว่าผู้ใช้กดตื่นเอง */
   markRestoredTabs(tabIds) {
     if (!this.#schema || !Array.isArray(tabIds)) return;
     let changed = false;
@@ -463,6 +480,7 @@ export class GroupStore {
       if (this.#schema.restoredTabIds[id] !== 1) { this.#schema.restoredTabIds[id] = 1; changed = true; }
       const binding = this.#schema.liveTabs[id];
       if (binding && binding.r !== 1) { binding.r = 1; changed = true; }
+      if (binding && binding.s !== 1) { binding.s = 1; changed = true; }
     }
     if (changed) this.#scheduleSave();
   }

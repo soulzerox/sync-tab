@@ -108,6 +108,9 @@ export class RestoreEngine {
           pinned: false
         });
         createdIds.push(created.id);
+        // mark ทันทีต่อแท็บ (ธง restoredTabIds/s ใน binding ต้องพร้อมก่อน event ของแท็บนี้ถูกประมวลผล)
+        // — ใน finally ยัง mark รวมทั้งชุดอีกรอบ idempotent สำหรับกรณี flow ขาดกลางทาง
+        this.#store.markRestoredTabs([created.id]);
         await this.#ensurePendingUrl(created, entry.url);
 
         if (groupId === null) {

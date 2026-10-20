@@ -1,5 +1,6 @@
 /**
- * BrowserMirror unit tests (node --test) — Sync Laws L1–L8 + reconcile (SOT §9 T1–T8)
+ * BrowserMirror unit tests (node --test) — SOT §9: T1–T8 ฐานหลัก (L1–L8 + reconcile)
+ * + ชุด v3.1 ต่อยอด (L13–L17: ปิดเอง/เลื่อนตาม/แท็บหลับแบบ Edge)
  * ฐานเทส: fake chrome + ยิง event handlers หน้าสนิมแบบเดียวกับที่ Edge ส่งมา
  */
 
@@ -404,4 +405,128 @@ test("L14(v3.1): url เดิมยังมีแท็บอื่นตื�
   const tabs = store.snapshot().groups["งาน D"].tabs;
   assert.equal(tabs["https://d/p"].liveCount, 1, "url เดิมยังมีชีวิต — ไม่ลบ");
   assert.ok(tabs["https://d/q"], "แท็บที่เปลี่ยนหน้ามี record ตัวเอง");
+});
+
+// ------------------------------------------------------------------
+// L17 (v3.1) — แท็บหลับแบบ Edge Sleeping Tabs (`discarded=true` แต่ยังเปิดค้างใน strip)
+// ------------------------------------------------------------------
+
+test("L17: Edge sleeping-tab เปิดค้าง + reconcile (SW restart) → นับเป็นตื่น ไม่หลับผิดสถานะ", async () => {
+  const { store, mirror } = harness({
+    windows: [{ id: 101, focused: true, groups: [{ id: 100, title: "งาน S", color: "blue" }], tabs: [{ id: 110, url: "https://nov.example/writer", groupId: 100, discarded: true }] }]
+  });
+  await store.init();
+  seedIdleRecord(store, "งาน S", "https://nov.example/writer"); // แถวหลับที่ผู้ใช้เคยจำไว้
+  await store.flush();
+
+  await mirror.reconcile(); // SW ตื่นใหม่ — แท็บที่ Edge นอนเองยังอยู่จริง
+  const row = store.snapshot().groups["งาน S"].tabs["https://nov.example/writer"];
+  assert.equal(row.liveCount, 1, "แท็บเปิดค้างใน strip = ตื่นตามจริง (bug เดิม: กลายเป็น 'จำไว้ (หลับ)' ซ้ำกับแท็บที่เห็นใน Edge)");
+  assert.deepEqual(store.snapshot().groups["งาน S"].liveWindowIds, [101]);
+});
+
+test("L17: แท็บผลจาก restore (ธง s) คงหลับ — event loading ของ flow เองไม่ผุดเป็นตื่น", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+  seedIdleRecord(store, "งาน R", "https://r.example"); // แถวต้นทางที่ผู้ใช้กด restore จากมัน
+  await store.flush();
+
+  // โครงจังหวะจริงของ restore: mark ทันทีหลัง create (create event เองไม่มี url → ไม่ลงทะเบียน)
+  // แล้ว event onUpdated {status:"loading", url} ของแท็บที่สร้าง เข้า mirror แบบ awake (discarded=false)
+  store.markRestoredTabs([403]);
+  mirror.handleGroupCreated({ id: 300, title: "งาน R", color: "blue", windowId: 101 });
+  mirror.handleTabUpdated(403, { status: "loading", url: "https://r.example" }, { ...tabEvent({ id: 403, url: "https://r.example", groupId: 300, windowId: 101 }) });
+  mirror.handleTabUpdated(403, {}, { ...tabEvent({ id: 403, url: "https://r.example", groupId: 300, windowId: 101, discarded: true }) });
+  mirror.flushSync();
+
+  const row = store.snapshot().groups["งาน R"]?.tabs["https://r.example"];
+  assert.ok(row, "แถวต้นทางคงอยู่");
+  assert.equal(row.liveCount, 0, "แท็บที่ restore เอง = หลับตาม design (§6) — liveCount ไม่ขยับ");
+  const bind = store.liveBinding(403);
+  assert.equal(bind?.restored, true, "ธง r ปิดไม่ลบ (L13)");
+  assert.equal(bind?.sleeping, true, "ธง s บอกว่ายังเป็นแท็บหลับผลจาก restore");
+});
+
+test("L17: ผู้ใช้กดตื่นแท็บที่ restore ไว้ → ถอนธง s แล้วนับเป็นตื่นตามจริง", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+  seedIdleRecord(store, "งาน R", "https://r.example");
+  await store.flush();
+
+  store.markRestoredTabs([403]);
+  mirror.handleGroupCreated({ id: 300, title: "งาน R", color: "blue", windowId: 101 });
+  mirror.handleTabUpdated(403, { status: "loading", url: "https://r.example" }, { ...tabEvent({ id: 403, url: "https://r.example", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  assert.equal(store.snapshot().groups["งาน R"].tabs["https://r.example"].liveCount, 0);
+
+  // ผู้ใช้คลิกแท็บหลับที่เพิ่ง restore → Edge นอนค้างแล้วตื่น (discarded=false) + โหลดหน้า
+  mirror.handleTabUpdated(403, { status: "complete", title: "Woke" }, { ...tabEvent({ id: 403, url: "https://r.example", title: "Woke", favIconUrl: "w.png", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+
+  const row = store.snapshot().groups["งาน R"].tabs["https://r.example"];
+  assert.equal(row.liveCount, 1, "ผู้ใช้เอาไปใช้จริง = ตื่น");
+  assert.equal(row.title, "Woke");
+  const bind = store.liveBinding(403);
+  assert.equal(bind?.sleeping, false, "ธง s ถูกถอน — นับตามจริงจากนี้ไป");
+  assert.equal(bind?.restored, true, "ธง r คงอยู่ — ปิดทีหลังยังหลับไม่ลบ (L13)");
+});
+
+test("L17: Edge นอนแท็บตื่นภายหลัง → ยังนับตื่น + ไม่หมุน title/favicon", async () => {
+  const { store, mirror } = harness();
+  await store.init();
+  await mirror.attach();
+
+  mirror.handleGroupCreated({ id: 300, title: "งาน E", color: "blue", windowId: 101 });
+  mirror.handleTabCreated({ ...tabEvent({ id: 404, url: "https://e.example", title: "จริง", favIconUrl: "a.png", groupId: 300, windowId: 101 }) });
+  mirror.flushSync();
+  assert.equal(store.snapshot().groups["งาน E"].tabs["https://e.example"].liveCount, 1);
+
+  // Edge sleeping-tab: onUpdated มาพร้อม discarded=true (title/favicon ในหน่วยความจำไม่น่าเชื่อ)
+  mirror.handleTabUpdated(404, {}, { ...tabEvent({ id: 404, url: "https://e.example", title: "ข้อมูลค้างของ Edge", favIconUrl: "stale.png", groupId: 300, windowId: 101, discarded: true }) });
+  mirror.flushSync();
+
+  const row = store.snapshot().groups["งาน E"].tabs["https://e.example"];
+  assert.equal(row.liveCount, 1, "ยังเปิดค้างจริง = ตื่น (L17)");
+  assert.equal(row.title, "จริง", "แท็บหลับไม่หมุน title (§6)");
+});
+
+test("L17: แท็บที่ผู้ใช้กดตื่นแล้ว SW ตายก่อน persist ธง → reconcile กู้เป็นตื่น (ถอนธง s จากสถานะจริง)", async () => {
+  const { store, mirror } = harness({
+    windows: [{ id: 101, focused: true, groups: [{ id: 100, title: "งาน W", color: "blue" }], tabs: [{ id: 120, url: "https://w/1", groupId: 100, discarded: false }] }]
+  });
+  await store.init();
+  seedIdleRecord(store, "งาน W", "https://w/1");
+  store.setLiveBinding(120, { groupName: "งาน W", urlKey: "https://w/1" }); // binding จากการจับเดิม
+  store.markRestoredTabs([120]);                 // ธงค้างจาก restore เก่า — แต่ตอนนี้แท็บตื่นจริง (ผู้ใช้กดแล้ว, save ธงถอนหายไปกับ SW)
+  await store.flush();
+  assert.equal(store.liveBinding(120)?.sleeping, true, "จุดเริ่ม: ธง s ค้างจาก restore เก่า");
+  assert.equal(store.isRestoredTab(120), true);
+
+  await mirror.reconcile();
+  const row = store.snapshot().groups["งาน W"].tabs["https://w/1"];
+  assert.equal(row.liveCount, 1, "แท็บตื่นจริง → นับตึนแม้ธง s เพิ่งถูกถอน");
+  assert.equal(store.liveBinding(120)?.sleeping, false, "ธง s ถูกถอนโดย reconcile");
+  assert.equal(store.liveBinding(120)?.restored, true, "ธง r คงอยู่ — ปิดทีหลังยังหลับไม่ลบ (L13)");
+});
+
+test("L17: reconcile prune ไม่ตัด binding/ธงของแท็บที่ยังเปิดค้างแต่ registry ตั้งใจไม่คิดเป็นตื่น", async () => {
+  const { store, mirror } = harness({
+    windows: [{ id: 101, focused: true, groups: [{ id: 100, title: "งาน P", color: "blue" }], tabs: [{ id: 110, url: "https://p/1", groupId: 100, discarded: true }] }]
+  });
+  await store.init();
+  store.markRestoredTabs([110]); // ธง restore ของแท็บที่ยังเปิดอยู่ (flow จบไปแล้ว SW ตายก่อนจับ event)
+  await mirror.reconcile();
+
+  const bind = store.liveBinding(110);
+  assert.ok(bind, "แท็บยังเปิดจริง — ห้าม prune binding ทิ้ง");
+  assert.equal(bind?.restored, true);
+  assert.equal(bind?.sleeping, true, "ธง s ติดตาม binding ที่สร้างตอน reconcile");
+  assert.equal(store.snapshot().groups["งาน P"], undefined, "แท็บผลจาก restore ไม่ถูกจับเป็นตื่น");
+
+  // control: แท็บที่ปิดไปจริง (ไม่ใช่แค่ไม่ถูกจับ) — binding ตัดด้วย prune ตามเดิม
+  store.setLiveBinding(999, { groupName: "งาน P", urlKey: "https://p/1" });
+  await mirror.reconcile(); // รอบเดียวพอ — reconcile รอบถัดไป prune id 999 (ไม่อยู่ใน windows)
+  assert.equal(store.liveBinding(999), null, "prune เฉพาะแท็บที่หายไปจริง");
 });

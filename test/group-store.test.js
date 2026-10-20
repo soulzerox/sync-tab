@@ -403,11 +403,11 @@ test("v3.1: liveBinding roundtrip + persist ข้าม init (รอดจา�
   await store.init();
   store.setLiveBinding(7, { groupName: "งาน", urlKey: "https://a/x" });
   await store.flush();
-  assert.deepEqual(store.liveBinding(7), { groupName: "งาน", urlKey: "https://a/x", restored: false });
+  assert.deepEqual(store.liveBinding(7), { groupName: "งาน", urlKey: "https://a/x", restored: false, sleeping: false });
 
   const boot2 = new GroupStore({ storage, now: () => 99, saveDelayMs: 0, setTimeoutFn: setTimeout, clearTimeoutFn: clearTimeout });
   await boot2.init();
-  assert.deepEqual(boot2.liveBinding(7), { groupName: "งาน", urlKey: "https://a/x", restored: false });
+  assert.deepEqual(boot2.liveBinding(7), { groupName: "งาน", urlKey: "https://a/x", restored: false, sleeping: false });
   assert.equal(boot2.liveBinding(999), null);
 });
 
@@ -505,5 +505,5 @@ test("v3.1: renameGroup เปลี่ยน binding ตามชื่อก�
   store.setLiveBinding(5, { groupName: "เก่า", urlKey: "https://a/x" });
   store.renameGroup("เก่า", "ใหม่");
   await store.flush();
-  assert.deepEqual(store.liveBinding(5), { groupName: "ใหม่", urlKey: "https://a/x", restored: false });
+  assert.deepEqual(store.liveBinding(5), { groupName: "ใหม่", urlKey: "https://a/x", restored: false, sleeping: false });
 });

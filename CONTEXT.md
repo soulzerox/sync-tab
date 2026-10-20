@@ -11,8 +11,8 @@
 | **Group Sync Library** ("คลัง") | ข้อมูลทั้งหมดที่ extension จำไว้ อยู่ใน `chrome.storage.local` คีย์ `groupsSync` โครงตาม schema v3 | database, store (คำ hardware), localStorage |
 | **Group record** | กลุ่มตามตัวอักษรชื่อเดียว (identity = ชื่อ ตรงตัว case-sensitive); ครอบ union แท็บจากทุกหน้าต่างปัจจุบัน + แท็บจำไว้ทุกแท็บ | tab group บน browser, session, window |
 | **Tab record** | แท็บหนึ่งรายการใน group record; identity = normalized URL (ต่อ 1 กลุ่มมี URL ไม่ซ้ำ); เก็บ title/favicon/order/timestamps | bookmark, tab จริงบน browser, session tab |
-| **ตื่น (live)** | สถานะ tab record เมื่อ `liveCount > 0` — กำลังเปิดอยู่บน browser จริง (instance อย่างน้อย 1) | online, active window |
-| **หลับ (idle)** | สถานะ tab record เมื่อ `liveCount == 0` — จำอยู่ในคลังโดย browser ไม่เปิดอยู่ | deleted, archived, "closed" |
+| **ตื่น (live)** | สถานะ tab record เมื่อ `liveCount > 0` — กำลังเปิดอยู่บน browser จริง (instance อย่างน้อย 1) — **รวมแท็บที่ Edge นอนเอง** (Edge Sleeping Tabs: `discarded=true` แต่ยังเปิดค้างใน strip — L17) | online, active window |
+| **หลับ (idle)** | สถานะ tab record เมื่อ `liveCount == 0` — จำอยู่ในคลังโดย browser ไม่เปิดอยู่ (เว้นเสียแต่หลับแบบ "ผลจาก restore" ด้านล่าง) | deleted, archived, "closed" |
 | **Live group** | instance จริงบน browser: ชื่อกลุ่ม + group object ในหน้าต่างใดหน้าต่างหนึ่ง; 1 group record มีได้หลาย Live group ตามจำนวนหน้าต่าง | group record, "group ในคลัง" |
 | **คลังมีชีวิต (live group record)** | group record ที่มี instance live อย่างน้อย 1 (badge "N หน้าต่าง" มาจากที่นี่) | อย่าเข้าใจว่า "record ไม่หลับ" — record ไม่หลับเมื่อมีแท็บตื่นเท่านั้น |
 | **Mirror** | กระบวนการ event-driven: chrome events → mutation ของคลัง (browser-mirror.js) — ทิศทางเดียว browser → คลัง, ยกเว้น RENAME popup → browser | "sync 2 ทาง" (ไม่ใช่), auto-restore |
@@ -24,6 +24,8 @@
 | **Live binding (v3.1)** | การผูก tabId จริง ↔ tab record (schema `liveTabs`: {ชื่อกลุ่ม, url key, ธง origin}; persist ใน storage รอดจาก SW restart) — ทำให้ record เลื่อนตามแท็บเมื่อเปิดหน้าใหม่ (L14) และแยก "ผู้ใช้ปิดแท็บเอง" ออกจาก "ปิด window/ตาย" (L13) | uid ถาวรของ record (ไม่มีคอนเซปต์นี้ — url ยังเป็นตัวตน), map หน่วยความจำล้วน (ไม่ใช่ — persist) |
 | **เงาสำรอง sync (L16)** | compact snapshot ของคลังใน `chrome.storage.sync` (ผูกบัญชีเบราว์เซอร์) เขียนอัตโนมัติทุก persist แบบ throttled — กู้เฉพาะตอน local ว่างจริง (เครื่องใหม่/ถอดแล้วติดตั้งใหม่); "ล้างแคช/ข้อมูลท่องเว็บ" ไม่แตะ storage ของ extension จึงไม่ต้องย้ายที่เก็บ | backup ข้ามไปไฟล์นอก (ไม่มี), sync 2 ทาง (ไม่ใช่ — เขียนทางเดียว local → sync) |
 | **Origin ป้องกัน (`r=1`) (v3.1)** | ธงบน binding ของแท็บที่ RestoreEngine สร้าง (`restoredTabIds`) และแท็บที่ reconcile/scan เจอครั้งแรก (สาเหตุกำเนิดไม่แน่) — ปิดแท็บเหล่านี้ = record หลับเหมือน v3.0 ไม่ลบ | "แท็บทุกตัวไม่ลบ" (ไม่ใช่ — แท็บที่จับจาก event ธรรมดา ปิดเองลบจริงตาม L13) |
+| **ธง ผลจาก restore (`s=1`) (v3.1)** | ธงบน binding ของแท็บที่ RestoreEngine สร้างมาให้**หลับ** — mirror ไม่นับเป็นตื่นใน liveMap (record ต้นทางคงหลับตาม design restore สองขั้น), **ผู้ใช้กดตื่นเอง = ถอนธง** (แท็บกลายเป็นของผู้ใช้ นับตื่นตามจริงต่อไป; ธง `r=1` คงอยู่เพื่อ L13) | ใช้ `r=1` แทนไม่ได้ — `r` ใช้กับ scan-first ด้วย จะทำแท็บหลับของ Edge จริงถูกกรองหายทั้งหมด |
+| **Edge Sleeping Tabs** | ฟีเจอร์ของ Edge เอง: นอนแท็บพื้นหลังที่ไม่ได้ใช้ (`discarded=true`) โดยแท็บยังเปิดค้างใน strip — ต่างจาก "เปิดแบบหลับ" ของ extension ตรงผู้ก่อการ (Edge สั่งเอง ไม่ใช่ restore ของผู้ใช้); ทำให้ SW restart + reconcile ห้ามจัดเป็น record หลับ (ซ้ำกับแท็บที่เห็นใน Edge) | "หลับ" ในคลัง (ไม่ใช่ — เปิดค้างจริง = ตื่นตาม L17) |
 | **Full rescan** | คำสั่งผู้ใช้ (Alt+Shift+S) เรียก reconcile รอบใหม่ด้วยตนเอง | auto scan, alarm (มีเฉพาะ event-driven) |
 
 ## ประวัติการถอดรื้อ (สั้น)

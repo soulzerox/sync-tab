@@ -5,7 +5,7 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 ## Layout
 - `manifest.json` — MV3 manifest, permissions: `tabs`, `tabGroups`, `storage`, `unlimitedStorage`
 - `background/service-worker.js` — wires chrome listeners synchronously (mirror), message router for the 7 RPC types
-- `background/browser-mirror.js` — chrome events → in-memory registries → liveMap → GroupStore
+- `background/browser-mirror.js` — chrome events → in-memory registries → liveMap → GroupStore; แท็บหลับแบบ Edge (`discarded` ยังเปิดค้าง) ยังเข้า registry นับตื่นตาม L17 — ยกเว้นแท็บผลจาก restore (ธง `s` ใน binding, ผู้ใช้กดตื่นแล้วถอนธง); prune ตอน reconcile เอาเฉพาะแท็บที่ปิดไปจริงตาม window scan
 - `background/group-store.js` — the single state seam (storage projection, schema v3, debounced persist + `flush()`; backup hook + `consumeRestoredSyncNotice()`)
 - `background/restore-engine.js` — restore flow: diff → create → ensure-URL → group → setColor → wait-commit → discard, staggered + mutex
 - `background/sync-backup.js` — เงาสำรองคลังไป `chrome.storage.sync` (compact + chunk ≤6800, throttle 5 นาที, กู้เฉพาะ local ว่างจริง)

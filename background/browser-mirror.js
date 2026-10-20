@@ -85,10 +85,20 @@ export class BrowserMirror {
     }
     for (const w of windows) {
       if (w.incognito) continue;
-      for (const t of w.tabs ?? []) this.#tryRegisterTab(t, true);
+      for (const t of w.tabs ?? []) {
+        // แท็บตื่นจริงบน browser — ธง s (ผลจาก restore) หมดอายุทันที กู้จังหวะ SW ตายหลังผู้ใช้กดตื่นแต่ก่อน persist
+        if (!t.discarded) this.#store.clearSleepingFlag(t.id);
+        this.#tryRegisterTab(t, true);
+      }
     }
-    // v3.1 — ตัด binding/ธงของแท็บที่ปิดไประหว่าง SW หลับ (record ของมัน retire โดย diff แล้ว)
-    this.#store.pruneLiveBindings([...this.#tabsByTabId.keys()]);
+    // v3.1 — ตัด binding/ธงของแท็บที่ปิดไประหว่าง SW หลับเท่านั้น (ไม่อยู่ใน windows อีกจริง ๆ)
+    // แท็บที่ยังเปิดค้างแต่ registry ตั้งใจไม่จับ (เช่น แท็บผลจาก restore ที่ต้องหลับ) — ธง origin ต้องรอด
+    const aliveIds = new Set();
+    for (const w of windows) {
+      if (w.incognito) continue;
+      for (const t of w.tabs ?? []) aliveIds.add(String(t.id));
+    }
+    this.#store.pruneLiveBindings([...this.#tabsByTabId.keys(), ...aliveIds]);
     this.#syncNow({ markScan: true });
   }
 
@@ -133,8 +143,23 @@ export class BrowserMirror {
       return;
     }
 
-    if (tab.discarded && !prev) return; // แท็บหลับที่ไม่เคยจับ — ไม่สร้าง record จากแท็บหลับลอย ๆ
-    if (tab.discarded) return; // แท็บหลับไม่จัดการ title/favicon ใหม่ (SOT §6)
+    // v3.1 — แท็บหลับ (discarded = Edge sleeping-tab: ยังเปิดค้างใน strip) ไม่หมุน title/favicon
+    // แต่ต้องจับเข้า registry ให้ครบ — "แท็บหลับ = แท็บเปิดอยู่จริง" (ถ้าโดนกรองทิ้ง แท็บที่ Edge นอนเอง
+    // จะหายจาก liveMap หลัง SW restart + reconcile → row ผิด ๆ กลายเป็น "จำไว้ (หลับ)" ทั้งที่เปิดอยู่)
+    if (tab.discarded) {
+      if (prev) {
+        prev.discarded = true; // ตื่น → หลับ (Edge นอนให้เอง): คงสถานะ ไม่อัปเดตข้อมูลหน้า
+        this.#scheduleEmit();
+        return;
+      }
+      this.#tryRegisterTab(tab); // แท็บหลับที่ไม่เคยจับ — ยังเป็นแท็บเปิดจริงในกลุ่ม
+      this.#scheduleEmit();
+      return;
+    }
+    if (prev && prev.discarded) {
+      prev.discarded = false; // ผู้ใช้กดตื่นแท็บที่หลับ (Edge sleeping / แท็บที่ restore ไว้) — กลับมาเป็นตื่นตามจริง
+      this.#store.clearSleepingFlag(tabId); // ถอนธง s — แท็บผลจาก restore ที่ถูกเอาไปใช้จริง นับตื่นตั้งแต่นี้
+    }
 
     // v3.1 L14 — แท็บที่ผูกไว้เปิดหน้าใหม่: คิว "record เลื่อนตาม" (คิดหลัง rebuild ต่อ burst)
     // origin ป้องกัน (restored/scan-first) ไม่เลื่อน — แถวเดิมค้างเป็นหลับตาม v3.0
@@ -259,14 +284,23 @@ export class BrowserMirror {
     const url = normalizeUrl(t.url);
     if (!url || isIgnoredUrl(t.url)) return false;
     if (typeof t.groupId !== "number" || t.groupId === TAB_ID_NONE) return false;
-    if (t.discarded && !this.#tabsByTabId.has(t.id)) return false;
+
+    // สถานะ "หลับ" ที่ registry จำไว้ (buildLiveMap คิดจากธง s ใน binding เป็นหลัก — ธงนี้ไว้ตามจับการตื่น/หลับเปลี่ยนมือ):
+    //  - t.discarded = Edge Sleeping Tabs ของผู้ใช้ (เปิดค้างจริง → ยังนับเป็นตื่น)
+    //  - แท็บผลจาก restore: มีธง restoredTabIds แต่ binding ยังไม่เกิด (ช่วง create→discard ของ flow เอง)
+    //    → ถือหลับตั้งแต่แรก กันจังหวะ event loading ของ flow ผุดเป็นตื่นชั่วขณะ
+    //  - binding เดิมมีธง s (restore ที่ผู้ใช้ยังไม่กดตื่น) → คงหลับ
+    const bindBefore = this.#store.liveBinding(t.id);
+    const asSleeping = Boolean(t.discarded) || Boolean(bindBefore?.sleeping) ||
+      (this.#store.isRestoredTab(t.id) && !bindBefore);
 
     this.#tabsByTabId.set(t.id, {
       groupId: t.groupId,
       windowId: t.windowId,
       url,
       title: sanitizeTitle(t.title, undefined, url),
-      favIconUrl: t.favIconUrl || undefined
+      favIconUrl: t.favIconUrl || undefined,
+      discarded: asSleeping // ไว้จับการเปลี่ยนมือตื่น/หลับใน handleTabUpdated (liveMap ตัดสินจากธง s ของ binding)
     });
 
     // v3.1 — ผูก tabId ↔ record (ถ้ามี binding เดิม: url/ชื่อกลุ่มเปลี่ยนตาม, ธง origin ติดค้าง)
@@ -318,7 +352,11 @@ export class BrowserMirror {
   // ------------------------------------------------------------------
   #buildLiveMap() {
     const live = new Map();
-    for (const entry of this.#tabsByTabId.values()) {
+    for (const [tabId, entry] of this.#tabsByTabId) {
+      // v3.1 L17 — แท็บผลจาก restore (ธง s ใน binding) ไม่เข้า liveMap — record ต้นทางคงหลับตาม §6
+      // ไม่แคร์สถานะ discarded ปัจจุบัน เพราะช่วง create→discard ของ flow เอง อาจได้รับ event แบบ awake ก่อน mark
+      // (มีเพียง "ผู้ใช้กดตื่นจริง" เท่านั้นที่ถอนธง s — handleTabUpdated เส้นตื่น)
+      if (this.#store.liveBinding(tabId)?.sleeping) continue;
       const g = this.#groupsByGroupId.get(entry.groupId);
       const name = g?.name ?? "";
       if (!name) continue; // unnamed — ไม่จับ

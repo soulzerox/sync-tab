@@ -266,7 +266,7 @@ export function createFakeChrome(seed = {}) {
         active: Boolean(t.active),
         pinned: Boolean(t.pinned),
         incognito: Boolean(w.incognito),
-        discarded: false,
+        discarded: Boolean(t.discarded), // v3.1 — seed แท็บเปิดค้างแบบ Edge Sleeping Tabs ได้ (discarded=true)
         status: "complete"
       });
     }
