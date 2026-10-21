@@ -1,20 +1,18 @@
 {
-  "name": "browser-tab-sync-edge",
-  "version": "2.3.0",
-  "description": "Smart Browser Tab Sync & Missing Tab Restore Extension for Microsoft Edge on Ubuntu Linux",
+  "name": "synctab-group-sync",
+  "version": "3.4.0",
+  "description": "Group-only tab sync for Microsoft Edge (MV3) — mirror live tab groups and restore them as sleeping (discarded) tabs",
   "type": "module",
   "scripts": {
-    "test": "node --test",
-    "test:watch": "node --test --watch",
-    "test:native": "python3 -m unittest discover -s test -p 'test_*.py'"
+    "test": "node --test \"test/*.test.js\"",
+    "test:watch": "node --test --watch \"test/*.test.js\""
   },
   "keywords": [
     "edge",
     "extension",
     "tab-sync",
+    "tab-groups",
     "sleeping-tabs",
-    "sqlite",
-    "ubuntu",
     "manifest-v3"
   ],
   "author": "Antigravity",

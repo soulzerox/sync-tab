@@ -1,221 +1,50 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="th">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SyncTab Manager</title>
-  <link rel="stylesheet" href="popup.css">
+  <meta charset="utf-8" />
+  <title>SyncTab — Group Sync</title>
+  <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <div class="app-container">
-    <!-- Header -->
-    <header class="app-header">
-      <div class="brand">
-        <div class="brand-logo">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="4" width="20" height="16" rx="4" fill="url(#brand-grad)" />
-            <path d="M7 8H17M7 12H14M7 16H11" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
-            <defs>
-              <linearGradient id="brand-grad" x1="2" y1="4" x2="22" y2="20" gradientUnits="userSpaceOnUse">
-                <stop stop-color="#0078D4"/>
-                <stop offset="1" stop-color="#00C4FF"/>
-              </linearGradient>
-            </defs>
-          </svg>
-        </div>
-        <div class="brand-text">
-          <h1>SyncTab</h1>
-          <span class="subtitle">Smart Tab & Window Sync</span>
+  <div class="popup" id="popup">
+    <header>
+      <div class="brand-row">
+        <h1>Group Sync</h1>
+        <div class="stats" id="stats">
+          <span class="stat"><b id="stat-groups">0</b> กลุ่ม</span>
+          <span class="stat"><b id="stat-tabs">0</b> แท็บ</span>
+          <span class="stat"><b id="stat-awake">0</b> ตื่น</span>
+          <button class="theme-toggle" id="theme-toggle" aria-label="สลับธีมสว่าง/มืด" title="สลับธีม">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" id="theme-icon"></svg>
+          </button>
         </div>
       </div>
-      <div class="header-actions">
-        <button id="btn-manual-backup" class="icon-btn" title="Create Snapshot Backup (Alt+Shift+B)">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-        </button>
-        <button id="btn-export-menu" class="icon-btn" title="Export / Import Tabs">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        </button>
-        <button id="btn-settings-toggle" class="icon-btn" title="Settings">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
+      <div class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="search" id="search" placeholder="ค้นหากลุ่มหรือแท็บ…" aria-label="ค้นหากลุ่มหรือแท็บ" />
       </div>
     </header>
 
-    <!-- Storage Status Banner / Setup Guide -->
-    <section id="native-status-card" class="status-card">
-      <div class="status-indicator">
-        <span id="status-dot" class="dot dot-yellow"></span>
-        <span id="status-text" class="status-label">Checking storage...</span>
-      </div>
-      <div id="setup-guide-box" class="setup-guide-box hidden">
-        <p class="guide-title">💡 Connect Persistent SQLite Drive:</p>
-        <p class="guide-desc">Select your OS, click Copy, and paste into Terminal:</p>
-        <div class="os-tabs">
-          <button id="tab-os-linux" class="os-tab-btn active" data-os="linux">🐧 Linux</button>
-          <button id="tab-os-mac" class="os-tab-btn" data-os="mac">🍎 macOS</button>
-          <button id="tab-os-win" class="os-tab-btn" data-os="win">🪟 Windows</button>
-        </div>
-        <div class="command-box">
-          <code id="setup-cmd-text">Loading command...</code>
-          <button id="btn-copy-cmd" class="btn-copy" title="Copy Command">📋 Copy</button>
-        </div>
-        <p class="guide-desc" style="font-size: 11px; margin-top: 4px; color: var(--text-dim);">
-          ✨ Automatically configures SQLite for Edge, Chrome, Chromium, Brave, and Vivaldi! (Windows users can also simply double-click <code>setup_native_host.bat</code>).
-        </p>
-        <button id="btn-test-connection" class="btn-secondary btn-sm" style="margin-top: 6px;">🔄 Test Connection</button>
-      </div>
-    </section>
+    <main class="list" id="list" aria-live="polite"></main>
 
-    <!-- Search & Filter Bar -->
-    <section class="search-section">
-      <div class="search-wrapper">
-        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="search-input" placeholder="Search tabs, groups, or windows..." autocomplete="off">
-        <button id="btn-clear-search" class="clear-search hidden" title="Clear">✕</button>
-      </div>
-    </section>
+    <footer>
+      <span class="syncline"><span class="okdot"></span><span id="sync-time">ยังไม่สแกน</span></span>
+      <span class="hint">แท็บนอกกลุ่มไม่ถูกจับ</span>
+    </footer>
+  </div>
 
-    <!-- Main Content Area (60 FPS Optimized Scroll) -->
-    <main class="content-scroll">
-      <!-- Active Windows Section (Read-Only Mirror) -->
-      <section class="window-section">
-        <div class="section-header">
-          <div class="section-title-wrap">
-            <span class="section-title">Active Windows</span>
-            <span id="active-window-count" class="badge badge-primary">0</span>
-          </div>
-          <button id="btn-collapse-all-active" class="btn-ghost-sm" title="Toggle collapse all">Toggle All</button>
-        </div>
-        <div id="active-windows-list" class="window-list">
-          <div class="empty-state">Loading active windows...</div>
-        </div>
-      </section>
+  <div class="toast-host" id="toast-host" role="status" aria-live="polite"></div>
 
-      <!-- Automatic recovery checkpoints for browser-side tab loss -->
-      <section class="window-section recovery-section">
-        <div class="section-header">
-          <div class="section-title-wrap">
-            <span class="section-title">Recovery Checkpoints</span>
-            <span id="recovery-checkpoint-count" class="badge badge-secondary">0</span>
-          </div>
-        </div>
-        <div id="recovery-alert" class="recovery-alert hidden" role="status" aria-live="polite">
-          <div>
-            <strong>Possible unexpected tab loss</strong>
-            <p id="recovery-alert-copy"></p>
-          </div>
-          <div class="recovery-alert-actions">
-            <button id="btn-restore-alert-checkpoint" class="btn-primary btn-sm">Restore from checkpoint</button>
-            <button id="btn-dismiss-recovery-alert" class="btn-ghost-sm">Confirm intentional close</button>
-          </div>
-        </div>
-        <div id="recovery-checkpoints-list" class="window-list">
-          <div class="empty-state">No recovery checkpoints yet</div>
-        </div>
-      </section>
-
-      <!-- Closed Windows Archive Section (Editable, Groups, & Pinned) -->
-      <section class="window-section">
-        <div class="section-header">
-          <div class="section-title-wrap">
-            <span class="section-title">Closed Windows Archive</span>
-            <span id="closed-window-count" class="badge badge-secondary">0</span>
-          </div>
-          <button id="btn-collapse-all-closed" class="btn-ghost-sm" title="Toggle collapse all">Toggle All</button>
-        </div>
-        <div id="closed-windows-list" class="window-list">
-          <div class="empty-state">No closed windows in archive</div>
-        </div>
-      </section>
-    </main>
-
-    <!-- Settings Modal -->
-    <div id="settings-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content">
-        <div class="modal-header">
-          <h2>Settings</h2>
-          <button id="btn-close-settings" class="close-modal-btn">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="setting-item">
-            <label for="set-auto-restore">
-              <strong>Auto-Restore on Startup</strong>
-              <small>Automatically restore previous session tabs when browser starts</small>
-            </label>
-            <input type="checkbox" id="set-auto-restore" checked>
-          </div>
-
-          <div class="setting-item">
-            <label for="set-lazy-restore">
-              <strong>Lazy Restore (Edge Sleeping Tabs)</strong>
-              <small>Open missing tabs in discarded state (0% CPU/RAM until clicked)</small>
-            </label>
-            <input type="checkbox" id="set-lazy-restore" checked>
-          </div>
-
-          <div class="setting-item">
-            <label for="set-auto-clean">
-              <strong>Auto Clean Blank New Tab</strong>
-              <small>Close initial empty tab automatically after restoring</small>
-            </label>
-            <input type="checkbox" id="set-auto-clean" checked>
-          </div>
-
-          <div class="setting-item">
-            <label for="set-strip-tracking">
-              <strong>Strip URL Tracking Parameters</strong>
-              <small>Clean utm_*, fbclid, etc. from saved tab URLs</small>
-            </label>
-            <input type="checkbox" id="set-strip-tracking" checked>
-          </div>
-
-          <div class="setting-item setting-item-column">
-            <label for="set-blacklist-domains">
-              <strong>Excluded Domains</strong>
-              <small>One domain per line. These sites are not saved in active snapshots or recovery checkpoints; subdomains are included.</small>
-            </label>
-            <textarea id="set-blacklist-domains" rows="3" placeholder="example.com&#10;private.example.org"></textarea>
-          </div>
-
-          <div class="setting-item">
-            <label for="set-retention">
-              <strong>Max Closed Windows Retention</strong>
-              <small>Maximum 5 archived windows total, including pinned templates</small>
-            </label>
-            <input type="number" id="set-retention" min="1" max="5" value="5">
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button id="btn-save-settings" class="btn-primary">Save Settings</button>
-        </div>
+  <div class="modal-host" id="confirm-host" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <b id="confirm-title"></b>
+      <p id="confirm-detail"></p>
+      <div class="modal-act">
+        <button class="btn" id="confirm-cancel" type="button">ยกเลิก</button>
+        <button class="btn danger" id="confirm-ok" type="button"></button>
       </div>
     </div>
-
-    <!-- Export / Import Modal -->
-    <div id="export-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content">
-        <div class="modal-header">
-          <h2>Export / Import Tabs</h2>
-          <button id="btn-close-export" class="close-modal-btn">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="export-actions">
-            <button id="btn-export-json" class="btn-secondary">💾 Export as JSON (Full Backup)</button>
-            <button id="btn-export-md" class="btn-secondary">📝 Export as Markdown (URLs)</button>
-          </div>
-          <hr class="divider">
-          <div class="import-section">
-            <label for="import-file-input"><strong>Import JSON Backup:</strong></label>
-            <input type="file" id="import-file-input" accept=".json">
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Toast Notification System -->
-    <div id="toast-container" class="toast-container"></div>
   </div>
 
   <script type="module" src="popup.js"></script>

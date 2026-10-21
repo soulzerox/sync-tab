@@ -35,7 +35,8 @@
 // สีตาม Chromium API — เก็บ "สีที่เห็นล่าสุด" ของกลุ่ม (cosmetic ที่ใช้จริงตอน restore)
 export type GroupColor = "grey" | "blue" | "red" | "yellow" | "green" | "pink" | "purple" | "cyan" | "orange";
 
-// สถานะแท็บในคลัง: liveCount > 0 = "ตื่น" (กำลังเปิดบน browser), 0 = "หลับ" (จำอยู่ใน extension)
+// สถานะแท็บในคลัง: liveCount > 0 = "ตื่น" (กำลังเปิดบน browser — รวมแท็บที่ Edge นอนเอง/discarded
+// ซึ่งยังเปิดค้างใน strip, เว้นแต่แท็บผลจาก restore ที่ยังหลับตาม design), 0 = "หลับ" (จำอยู่ใน extension) — อ้างกฎ L17
 export interface TabRecord {
   url: string;           // normalized URL = ทั้ง key และตัวตนของ record (dedupe ต่อ 1 กลุ่ม)
   title: string;         // title ล่าสุด (จำกัด 500 ตัวอักษร)
@@ -62,6 +63,10 @@ export interface StorageSchema {
   themepreference?: "dark" | "light" | "auto"; // popup toggle บันทึกที่นี่
   lastScanAt?: number;   // ครั้งล่าสุดที่ full rescan / startup reconcile
   migrationNoticeAt?: number;
+  restoredFromSyncAt?: number; // รอบวาง: init กู้คลังจากเงาสำรอง sync เพราะ local ว่างจริง (เครื่องใหม่/ติดตั้งใหม่) — popup โชว์ toast แล้ว consume ทิ้ง
+  // v3.1 — live tab tracking (ไม่ bump schema version; schema เก่าถือว่า = {} อัตโนมัติ)
+  liveTabs?: Record<string, { g: string; k: string; r?: 1; s?: 1 }>; // tabId → {ชื่อกลุ่ม, url key, r=origin ป้องกัน, s=ผลจาก restore (หลับตาม design — ผู้ใช้กดตื่นแล้วถอนธง)}; persist รอดจาก SW restart
+  restoredTabIds?: Record<string, 1>; // ธง tabId ที่ RestoreEngine สร้าง (ปิด = ไม่ลบ record)
 }
 ```
 
@@ -72,7 +77,7 @@ export interface StorageSchema {
 | L1 | แท็บเข้าคลังได้เมื่อ: มี `groupId ≥ 1` และ group นั้นมีชื่อ (exact string — ไม่ trim, case-sensitive), URL ผ่าน sanitizer (ฟิลเตอร์ `edge://`, `chrome://` และ scheme พิเศษอื่น), และไม่อยู่ในหน้าต่าง incognito |
 | L2 | Group identity = ชื่อเป๊ะ ๆ; กรณีสองหน้าต่างเปิดกลุ่มชื่อเดียวกัน = record เดียว (tabs เป็น union; `liveCount` นับรวมทุก instance; `liveWindowIds` รู้ว่าเปิดอยู่หน้าต่างไหนบ้าง) |
 | L3 | แท็บใหม่เปิดเข้า group ที่ตรงชื่อ → create/update record ทันที (`liveCount+1`, รวม title/favicon ขณะ live) |
-| L4 | ปิดแท็บ (รายตัว, ปิดทั้ง window, ปิดทั้งกลุ่ม — รวม event `isWindowClosing`) → `liveCount-1`; ถ้ากลายเป็น 0 = สถานะ "หลับ" (`closedAt` stamp) record คงอยู่ |
+| L4 | ปิดแท็บ (รายตัว, ปิดทั้ง window, ปิดทั้งกลุ่ม — รวม event `isWindowClosing`) → `liveCount-1`; ถ้ากลายเป็น 0 = สถานะ "หลับ" (`closedAt` stamp) record คงอยู่ *(v3.1: กรณี "ปิดรายตัว" ของแท็บที่ mirror จับจาก event โดยตรง → กลายเป็นการ **ลบ record** — ดู L13)* |
 | L5 | Group object บน browser ถูกลบ (tabGroups.onRemoved จากปิดแท็บหมด/ยุบกลุ่ม) → เฉพาะแท็บของ instance นั้นหลับ; ถ้ามี instance ชื่อเดียวกันใน window อื่น กลุ่มยังคง live ผ่าน instance นั้น |
 | L6 | ลากแท็บออกจากกลุ่ม (ungroup) → แท็บพ้นขอบเขต sync = หลับทันที (tab ตัวจริงยังเปิดอยู่ก็ตาม; restore จากปุ่ม = เปิดแท็บใหม่ ไม่ผูกกับ tab เก่า) |
 | L7 | เปลี่ยนชื่อกลุ่มบน browser → rekey record (ชื่อใหม่); ถ้าชื่อใหม่มี record อยู่แล้ว → union merge; ปรับ color ตาม event ล่าสุดเสมอ |
@@ -81,6 +86,11 @@ export interface StorageSchema {
 | L10 | **ไม่เคย** เปิดแท็บเองโดยไม่มีคำสั่งจากผู้ใช้: ไม่ auto-restore, ไม่ reopen group, ไม่มี auto-open ใด ๆ; `onInstalled`/`onStartup` = reconcile สถานะเท่านั้น |
 | L11 | Restore dedupe: URL ที่กำลังเปิดอยู่ใน window เป้าหมาย (ไม่ใช่เฉพาะในกลุ่ม) จะถูกข้าม (normalized URL) |
 | L12 | การบันทึกทุกครั้งเป็นชุด (batch ต่อ event burst, ≥ 80ms) และ flush ทันที 0ms เมื่อการเปลี่ยนแปลงทิศทาง "ปิด" เพื่อกันข้อมูลหลุดเมื่อ service worker ถูก kill กลางคัน |
+| L13 | (v3.1) ผู้ใช้ปิดแท็บเองจากเบราว์เซอร์ (`tabs.onRemoved` โดย `isWindowClosing=false`) ของแท็บที่ mirror จับจาก event → **ลบ record ทันที** ("ปิดตาม") — ยกเว้น: (a) `isWindowClosing=true` = ปิดทั้ง window → หลับตาม L4 เดิม; (b) origin ป้องกัน (`r=1`: แท็บที่ RestoreEngine สร้าง หรือแท็บที่ scan ครั้งแรกเจอ — สาเหตุกำเนิดไม่แน่) → หลับแทนการลบ; (c) url ยังมี instance อื่นตื่น (`liveCount>0`) → คง record ต่อ แค่ count ลด |
+| L14 | (v3.1, แก้ v3.4) แท็บที่ผูก binding เปิดหน้า/URL ใหม่ → **record เลื่อนตามแท็บ**: แถว url เดิมลบ, `addedAt`/`order` ย้ายไปแถว url ใหม่ (ผ่าน `moveLiveTabs` หลัง applyLiveMap ต่อ burst) — กันเฉพาะแท็บที่ **ยังหลับจริง** (ธง `s` ใน binding; v3.2/v3.3 ใช้ `isRestoredTab`/ธง `r` ซึ่งไม่ถูกถอน — ตันถาวรหลังผู้ใช้กดตื่น = แถวเก่าค้างหลับ + แถวใหม่โผล่เป็นคู่ซ้ำ); ถ้า url เดิมยังมี instance อื่นใช้อยู่ → แถวเดิมคงชีวิต (mirror นับ `remaining` จาก registry แล้วส่งให้ store) |
+| L15 | (v3.1) binding `tabId ↔ {g, k, r, s?}` persist ใน storage (`liveTabs` + `restoredTabIds`) — รอดจาก SW restart; init/reconcile ตัด binding ของแท็บที่ปิดไปจริง (ไม่อยู่ใน windows อีกแล้ว เอาจาก window scan ไม่ใช่ registry) เท่านั้น (prune); rename กลุ่มเปลี่ยนชื่อใน binding ตาม |
+| L16 | **เงาสำรอง sync (SyncBackup)**: ทุก persist local เสร็จ → เขียน compact snapshot แบบ chunk ไป `chrome.storage.sync` (throttle 5 นาที, no-op เมื่อ sync ไม่ว่าง) — init **เฉพาะตอน local ว่างจริง** (ไม่มี v3 และไม่มี key ระบบเก่า → เครื่องใหม่/ถอดแล้วติดตั้งใหม่) และเงาสำรองอ่านได้ → กู้เป็นคลัง + ประทับ `restoredFromSyncAt` (popup toast หนเดียว); local มี v3 หรือเจอ key เก่า (wipe v2) → ไม่แตะเงาสำรอง; "ล้างแคช/ข้อมูลท่องเว็บ" ไม่เคยแตะ storage ของ extension — เงาตัวนี้กันกรณีถอด/ล้าง profile/เครื่องใหม่ |
+| L17 | (v3.1) **ความหมายของ "ตื่น"**: แท็บที่ Edge นอนเอง (Edge Sleeping Tabs — `discarded=true` แต่ยังเปิดค้างใน strip) **นับเป็นตื่น** (`liveCount>0`) เพราะยังเป็นแท็บเปิดจริงบนเบราว์เซอร์ — SW restart + reconcile ห้ามพลาดไปเป็น "จำไว้ (หลับ)"; แท็บที่ RestoreEngine สร้างมาให้หลับ (ธง `s=1` คู่ `r=1`) **คงหลับ** จนผู้ใช้กดตื่นเอง (กดตื่น → ถอนธง `s`, ธง `r` คงไว้ให้ L13); แท็บหลับทุกชนิดยังกันอัปเดต title/favicon ตาม §6 |
 
 ---
 
@@ -118,11 +128,14 @@ flowchart TD
 
 | โมดูล | ความรับผิดชอบ | Interface (หลังเขียน) |
 |---|---|---|
-| `background/group-store.js` | คลังกลุ่ม: CRUD, live/idle flips, rename rekey+merge, empty-group GC, persist (debounce batch + 0ms close-flush) | `getGroups()`, `applyTabAdded`, `applyTabRemoved`, `applyGroupEvent`, `rename`, `deleteGroup`, `deleteTab`, `getSnapshot()` (สำหรับ popup) |
-| `background/browser-mirror.js` | รับ chrome event → ตัดสินว่า "เกี่ยวกับกลุ่มไหม" แล้วแปลงเป็น mutation ของ GroupStore; รักษาแผนที่ groupId↔ชื่อกลุ่ม per-session; reconcile/rescan | `attach(chrome, store)`, `reconcile(mode: "full"\|"status")`, `handle*(info)` (ตัวเรียกเทส) |
-| `background/restore-engine.js` | opener: หา window เป้าหมาย + existing live group; diff; create → group → update → discard แบบ staggered (120ms) + mutex + รายงานผลรายแท็บ | `openTabs({name, urls}) → {opened, skipped, failed}` |
-| `background/url-sanitizer.js` | (คงเดิมจาก v2) normalize URL, ตัดพารามิเตอร์เชิงทำงาน, filter privileged scheme | คงเดิม |
-| `background/service-worker.js` | จุดเกิด event: `tabs.onCreated/onUpdated/onRemoved/onMoved/onAttached/onDetached`, `tabGroups.onCreated/onUpdated/onRemoved`, `windows.onCreated/onRemoved`, `commands.onCommand(Alt+Shift+S → rescan)`, `runtime.onInstalled/onStartup` + message router | — |
+| `background/browser-mirror.js` | event → state (v3.1 L13–L17: ลบ record เมื่อปิดเอง, move ตามแท็บ, sleeping-tab lifecycle; URL อ่านจาก `changeInfo.url`/`pendingUrl` — never `tab.url` event แรก v3.2; reconcile ซ่อม binding ชี้ URL เก่า v3.2); **v3.4 — `tabs.onReplaced` (ใหม่): rekey binding + ธงให้ id ใหม่ (Edge แทนแท็บด้วย id), L14 กัน move เฉพาะแท็บของ binding sleeping หรือ restore แบบยังไม่มี binding**ทุกขั้นบันทึก debug log (dbg "mirror" — register/skip เด็ด software; move/delete/binding:repair, แท็บ asleep/wake, sync สรุป hotspot) | `attach()`, `reconcile()`, `flushSync()`, `handleTabCreated/Updated/Removed/Replaced`, `handleTabAttached/Detached`, `handleGroupCreated/Updated/Removed`, `handleWindowRemoved` |
+| `background/group-store.js` | คลังกลุ่ม: diff projection จาก liveMap, live/idle flips, rename rekey+union merge, deleteTab/deleteTabs (bulk; input ผ่าน normalize + dedupe) + empty-group GC (L8), init ยก key ติด fragment (#hash) ให้เป็น normalized key + merge ตัวซ้ำ (v3.0.1 dedupe), **live tab tracking (v3.1 L13–L15): binding tabId↔record persist, mark restored/protect origin, moveLiveTabs (record เลื่อนตาม), consumeDeletedTabs (ปิดเอง = ลบ), v3.4 — `rekeyLiveTab(oldId, newId)` ย้าย binding/ธงตาม id ใหม่; setLiveBinding ธง s ยึด prev เท่านั้น (isMarked ใช้ครั้งแรก)`**, persist (debounce 80ms batch + `flush()` + ยิงเงาสำรอง sync throttled ผ่าน `backup.writeSoon` ทุกครั้งหลัง set) | `init()`, `snapshot()`, `getGroups()`, `applyLiveMap(liveMap, {markScan})`, `renameGroup(oldName, newName)`, `deleteGroup(name)`, `deleteTab(name, url)`, `deleteTabs(name, urls)`, `liveBinding(tabId)`, `setLiveBinding(tabId, {groupName, urlKey})`, `protectLiveBinding(tabId)`, `clearLiveBinding(tabId)`, `pruneLiveBindings(aliveTabIds)`, `markRestoredTabs(tabIds)`, `moveLiveTabs(moves)`, `consumeDeletedTabs(deletes)`, `rekeyLiveTab(oldId, newId)`, `setTheme(t)`, `markScan()`, `markMigrationNotice()`, `consumeMigrationNotice()`, `consumeRestoredSyncNotice()` (toast กู้จากเงาสำรอง L16), `themePreference`, `ready`, `migrated`, `flush()` |
+| `background/browser-mirror.js` | รับ chrome event → เก็บ session registries (groupId↔{windowId,name,color}, tabId↔data) → rebuild liveMap → เรียก `applyLiveMap`; rename ระหว่าง event เรียก `store.renameGroup` ก่อน (L7), reconcile/rescan อ่านสถานะจริงทั้งชุด (ตัด incognito/unnamed/privileged, binding scan ครั้งแรก = protected; แท็บหลับแบบ Edge/discarded ยังเข้า registry — นับตื่นตาม L17 เว้นแต่แท็บผลจาก restore ธง `s`); คิว v3.1 ยิงหลัง diff ต่อ burst: url เปลี่ยน (อ่านจาก `changeInfo.url` — v3.2) → `moveLiveTabs` (L14), ปิดเอง (isWindowClosing=false + origin ธรรมดา) → `consumeDeletedTabs` (L13); v3.2: reconcile ซ่อม binding ที่ชี้ url เก่ากว่าแท็บจริง (คิว move ระหว่าง full scan — เหตุ SW ตายกลางทางไม่ได้ event); #forgetTab ตัด binding ทุกเส้นทางที่แท็บพ้นขอบเขต | `attach() → Promise` (ลง listeners แบบ sync + reconcile), `reconcile()`, `handle{TabCreated,TabUpdated,TabRemoved,TabAttached,TabDetached,GroupCreated,GroupUpdated,GroupRemoved,WindowRemoved}(...)`, `flushSync()` |
+| `background/restore-engine.js` | opener: หา window เป้าหมาย + existing live group; diff ตาม L11 (URL ว่าง/privileged ไม่ลง plan; **openUrls รวม binding ของแท็บ Untitled ที่ restore สร้าง — กดซ้ำไม่สร้างซ้ำ v3.4**); create → ยืนยัน URL บนแท็บ (`tabs.update` ถ้า browser คืนมาเปล่า) → group → update(color เฉพาะกลุ่มใหม่) → รอ commit จริง = **title ถูกตั้ง / status complete** (`tabs.onUpdated`, `changeInfo.url`/`{status:"loading"}` ยังไม่นับ — v3.3; timeout `RESTORE_COMMIT_MS`=3000ms v3.4) → discard แบบ staggered (120ms) + per-name mutex + เช็ค window ยังอยู่หลังทุก sleep + rekey ตาม discardResult (ถ้า browser คืน id ใหม่ — defensive v3.4) + ตรวจ URL ซ้ำหลัง discard; ท้าย flow mark `store.markRestoredTabs` (origin 'restored' — ปิดแท็บที่สร้างเอง = record คงอยู่ ไม่ลบ L13); ทุกขั้นบันทึก debug log (dbg "restore") | `openTabs({name, urls}) → {ok, opened, skipped, createdWindow} \| {ok:false, error}` |
+| `background/sync-backup.js` | เงาสำรองคลังไป `chrome.storage.sync` (L16): compact snapshot (ชื่อ/สี/url+title ย่อ 60) → chunk ≤6800 อักษร + meta ท้ายสุด; `writeSoon` throttle 5 นาที/serialize คิว/no-op เมื่อไม่มี sync; `read` ตรวจครบชุด+JSON ใช้ได้เท่านั้น; `schemaFromPayload` rebuild record idle order 0-based | `writeSoon(schema, {force}) → bool`, `read() → schema \| null`, `compact()`, `schemaFromPayload()` |
+| `background/url-sanitizer.js` | normalize URL (v3.1): lower host, ตัด trailing slash, ตัด `#hash`, ตัด tracking params (`__cf_chl*`, `utm_*`, `fbclid`, `gclid`, `msclkid`, `twclid`, `igshid`, `mc_eid`, `yclid` — `TRACKING_PARAM_PREFIXES`) + v3.5 ตัด volatile params ของ SPA (`draftId`, `tab` — `VOLATILE_PARAM_NAMES`), filter privileged scheme | `normalizeUrl(url, stripTracking=true)`, `isIgnoredUrl(url)`, `sanitizeTitle(title, fallback, url)` |
+| `background/service-worker.js` | จุดเกิด event: `tabs.onCreated/onUpdated/onRemoved/onAttached/onDetached`, `tabGroups.onCreated/onUpdated/onRemoved`, `windows.onRemoved`, `runtime.onInstalled/onStartup` + message router (MSG.GET_STATE/OPEN_TABS/DELETE_GROUP/DELETE_TAB/DELETE_TABS/RENAME_GROUP/SET_THEME/GET_DEBUG_LOGS); rename จาก popup → `store.renameGroup` + `tabGroups.update` (สองทาง L7); เปิด debug console log + expose `__syncTabLogs` | — |
+| `background/debug-log.js` | บันทึกการทำงานรายละเอียดทุกขั้น (ring buffer 1000 รายการ): scope `restore` (ทุก step ของ flow เปิดแท็บ), `mirror` (register/skip/move/sleep/wake/sync), `store` (apply/move/delete/mark), `sw` (rpc); อ่านผ่าน SW devtools `__syncTabLogs.getLogs()` หรือ RPC GET_DEBUG_LOGS; `dbg()` ห้ามโยนข้อผิดพลาดใส่ flow หลัก | `dbg(scope, msg, data)`, `enableConsole(on)`, `getLogs()`, `clearLogs()` |
 | `popup/popup.{html,css,js}` | Pure view: render state, selection,จัดเรียงการ์ด, ส่ง intent RPC, toast, empty-state, theme toggle | — |
 | `shared/` | `constants.js` (timings, 9 colors), `types.js`, `messages.js` | — |
 
@@ -134,12 +147,14 @@ flowchart TD
 
 ```typescript
 export type ExtensionMessage =
-  | { type: "GET_STATE" }                                   // คืน Snapshot ของคลัง + lastScanAt + theme
+  | { type: "GET_STATE" }                                   // คืน Snapshot ของคลัง + lastScanAt + theme + showMigrationNotice + restoredSyncBackup (ธงกู้จากเงาสำรอง sync — consume หนเดียวตอนเปิด popup)
   | { type: "OPEN_TABS"; payload: { groupName: string; urls: string[] } }  // [] = เปิดทั้งหมด (หลับเท่านั้น)
   | { type: "DELETE_GROUP"; payload: { groupName: string } }
   | { type: "DELETE_TAB"; payload: { groupName: string; url: string } }
+  | { type: "DELETE_TABS"; payload: { groupName: string; urls: string[] } }  // ลบหลายแท็บจากคลัง (normalize + dedupe ภายใน store; browser ไม่ถูกแตะ)
   | { type: "RENAME_GROUP"; payload: { groupName: string; newName: string } }
-  | { type: "SET_THEME"; payload: { theme: "dark" | "light" | "auto" } };
+  | { type: "SET_THEME"; payload: { theme: "dark" | "light" | "auto" } }
+  | { type: "GET_DEBUG_LOGS" };                              // คืน { ok, logs: DebugEntry[] } — ring buffer 1000 รายการล่าสุด (debug-log.js)
 ```
 
 กติกา: response ทุกประเภท `{ ok: true, ...payload }` หรือ `{ ok: false, error }`; popup ไม่มีสิทธิ์ขอ acquire สิทธิเปลี่ยน browser โดยตรงเด็ดขาด (ยึดหลัก unidirectional เดิม)
@@ -166,7 +181,7 @@ export type ExtensionMessage =
 1. โหลด record; หา **target window** = `chrome.windows.getLastFocused()` (ถ้า incognito/ไม่มี → หน้าต่าง normal แรก; ไม่มีเลย = สร้าง window ใหม่)
 2. หา live group ชื่อเดียวกันใน target window โดยเทียบ normalized title — ถ้าพบ ใช้เป็น `existingGroupId`; ไม่พบ → สร้างกลุ่มใหม่กับแท็บแรกที่ถูกสร้าง (ชื่อ + สีจาก record)
 3. ตัด URL ซ้ำกับ **แท็บทั้งหมดใน target window ตาม normalized URL** (L11)
-4. เปิดแบบทีละแท็บ staggered (~120ms ต่อแท็บ): `tabs.create({windowId, url, active:false})` → `tabs.group({tabIds:[id], groupId | createProperties:{windowId}})` → `tabGroups.update(gid, {title, color})` → `tabs.discard(id)` — **discard ทุกแท็บรวมแท็บแรกเสมอ** (แท็บที่ restore หลับ 100%)
+4. เปิดแบบทีละแท็บ staggered (~120ms ต่อแท็บ): `tabs.create({windowId, url, active:false})` → (ถ้าแท็บที่ browser คืนมาไม่มี URL → `tabs.update(id, {url})` ตั้ง URL จริงก่อน) → `tabs.group({tabIds:[id], groupId | createProperties:{windowId}})` → `tabGroups.update(gid, {title, color})` → **รอ navigation commit จริง (v3.3: `changeInfo.title` ถูกตั้ง หรือ `status:"complete"` — `changeInfo.url`/`{status:"loading"}` มาถึงก่อนเสมอ ห้ามนับ, timeout `TIMINGS.RESTORE_COMMIT_MS`=1000ms)** → `tabs.discard(id)` — **discard ทุกแท็บรวมแท็บแรกเสมอ** (แท็บที่ restore หลับ 100%); หลัง discard ตรวจ URL บนแท็บซ้ำ (`url` และ `pendingUrl` ต่างคนละฟิลด์ — ว่างทั้งคู่ = หลุด) — หลุด = ตั้งกลับผ่าน `tabs.update` (กันแท็บว่าง "Untitled" เพราะ discard ก่อน commit ยกเลิกการโหลด); URL ว่าง/privileged ไม่ลง create ตั้งแต่ plan (skipped); ทุกขั้น log ผ่าน `dbg("restore", ...)`
 5. รายงาน `{opened, skipped, failed}`; mirror เองจะ flip แท็บเหล่านี้เป็น live ตาม event ของ API
 6. Guard: มี mutex ต่อรอบ restore รายชื่อกลุ่ม (กันผู้ใช้กดซ้อนขณะรอบก่อนยังรัน); rescan กับ restore ใช้ mutex ชุดเดียวกันเพื่อไม่แย่งกัน; หาก target window ถูกปิดกลางทาง → หยุดและรายงาน failed (ลองแท็บถัดไปไม่ได้ — ไม่สร้าง window ใหม่กลางทาง)
 
@@ -174,10 +189,12 @@ export type ExtensionMessage =
 |---|---|
 | Restore burst + CPU flash ขณะ create คลอnoto | staggered 120ms + discard ทันทีภายในลำดับเดียวกัน; active:false; จำกัดความเร็ว per tab |
 | ผู้ใช้กดปุ่มซ้ำระหว่าง restore กำลังรัน | mutex ต่อชื่อกลุ่ม (รอ + ไม่กดซ้อน) |
-| Discard แล้ว API ยังยิง event `onUpdated` ของแท็บหลับ | mirror กรองแท็บที่ `tab.discarded == true` ออกจากการอัปเดต title/favicon ไม่ให้กลายเป็น mutation ใหม่ |
+| Discard แล้ว API ยังยิง event `onUpdated` ของแท็บหลับ | mirror กรองแท็บ `tab.discarded == true` ออกจาก title/favicon (ไม่กลายเป็น mutation) แต่ไม่กรองออกจาก liveMap — แท็บ discarded = เปิดค้างจริง นับตื่นตาม L17, เว้นแท็บผลจาก restore (ธง `s`); แท็บตื่นกลับมา (ผู้ใช้กด) → ถอนธง `s` ให้นับตามจริง |
 | Window ถูกปิดขณะ restore ยังไม่จบ | ตรวจ `windows.getAll` ก่อนทุกแท็บ; หาย → หยุด + รายงาน failed; **ไม่สร้าง window ซ้ำเอง** |
 | URL ซ้ำกับแท็บที่เปิดอยู่แล้วใน target window | ข้ามตาม L11 และนับเป็น `skipped` (รายงานท้ายรอบ) |
 | `tabs.group` fail (แท็บถูก pin, สถานะพิเศษของ window) | สร้างแท็บแบบ `pinned:false` เสมอ; fail → retry 1 ครั้งโดยกลับไปสร้างกลุ่มให้แท็บเดิมก่อน แล้วค่อยจัดแท็บถัดไปทีหลัง |
+| restore ได้แท็บว่าง "Untitled" ไม่มี URL (discard ก่อน browser เริ่ม navigation) | รอ commit **จริง = title ถูกตั้ง / status complete** (v3.3; `changeInfo.url`/`{status:"loading"}` มาก่อนเสมอ — นับผิด = discard ยกเลิกโหลด → แท็บว่าง/Untitled) +timeout fallback 1000ms กันคิวค้าง; ยืนยัน URL ทั้ง `url`/`pendingUrl` ก่อน group และตรวจซ้ำหลัง discard — หลุดที่ไหนก็ `tabs.update` ตั้ง URL จริงกลับ; URL ว่าง/privileged ไม่ลง create ตั้งแต่ plan; ทุกขั้นบันทึก debug log (`commit:timeout`/`tab:done`) |
+| ข้อมูลหายเมื่อถอด extension/ล้าง profile/เครื่องใหม่ (storage.local ผูก profile เครื่องเดียว) | เงาสำรอง sync อัตโนมัติทุก persist (L16) — กู้เฉพาะตอน local ว่างจริง; ล้างแคช/ข้อมูลท่องเว็บไม่แตะ storage ของ extension จึงไม่ต้องย้ายที่เก็บ |
 
 ---
 
@@ -245,6 +262,16 @@ export type ExtensionMessage =
 | T12 popup render (fixed state stub): sort, filter, selection count, disabled states, empty state | popup |
 | T13 rename ผ่าน RPC + response UI + tabGroups.update mock | L7 popup |
 | T14 mockup visual (สิ่งมี live): contrast tokens, focus ring, reduced-motion — manual + detector + สกรีนช็อต | popup |
+| T15 (v3.1) ปิดเอง (L13) vs ปิด window (isWindowClosing) vs origin ป้องกัน (restored/scan-first); binding persist ข้าม init + prune | L13/L15 |
+| T16 (v3.1) แท็บเปลี่ยน url → record เลื่อนตาม (แถวเก่าลบ, addedAt ต่อเนื่อง); มี instance อื่นยังใช้ url เดิม = คงแถวเดิม | L14 |
+| T17 (v3.1) normalizeUrl ตัด tracking params (`__cf_chl*`, `utm_*`, `fbclid` ฯลฯ) — Token ต่างกัน = record เดียว; param ธุรกิจ (page=2) คงอยู่ | sanitizer |
+| T18 กันแท็บว่าง "Untitled": record แถว URL ว่างไม่ลง create; browser คืนแท็บไร้ URL → `tabs.update` ตั้งจริงก่อน bind กลุ่ม; ไม่เห็น navigation signal → timeout แล้ว discard ต่อ (restore ไม่ค้าง) | เปิด (§6) |
+| T19 เงาสำรอง sync (L16): write→read roundtrip หลาย chunk + ตัด chunk เก่า + throttle/force + noop เมื่อไม่มี sync + ข้อมูลเสีย → null; init กู้เฉพาะ local ว่างจริง (ไม่ทับ v3, ไม่ทับ wipe v2) | L16 |
+| T20 (v3.1) แท็บหลับแบบ Edge (discarded เปิดค้าง): reconcile เจอ → นับตื่น (ไม่หลับผิด ๆ); แท็บผลจาก restore (ธง s) คงหลับ; ผู้ใช้กดตื่น → ถอนธงเป็นตื่น; Edge นอนแท็บตื่นภายหลัง → ยังนับตื่น; prune ไม่ตัดธงของแท็บที่ยังเปิดค้างแต่ registry ไม่จับ | L17/L15 |
+| T21 (v3.2) URL จาก `changeInfo` (ไม่ใช่ `tab.url`): แท็บเปลี่ยนหน้า → binding + record เดินตาม; แท็บ `r=1` เปลี่ยนหน้าก็เลื่อนได้ (แถวเก่าไม่ค้างซ้ำ); แท็บใหม่ `url` ว่างแต่มี `pendingUrl` → จับได้; แท็บอื่นใช้ url เดิม → แถวเดิมคง (count ลด); restore: commit = title/complete (v3.3) → ไม่มีแท็บว่าง Untitled | L14/เปิด (§6) |
+| T22 (v3.3) commit = `changeInfo.title`/`status:"complete"` เท่านั้น (loading/url ไม่นับ) → แท็บหลับมี URL+title จริง; debug log: restore flow บันทึกทุก step (`openTabs:start`→`plan`→`tab:create`→`tab:done` (commit signal)→`openTabs:done`) | เปิด (§6) |
+| T23 (v3.4) `onReplaced` → binding/ธง r/s รวมสถานะหลับเดินตาม id ใหม่ (แท็บเสร็จจะยังหลับ ไม่สร้างตื่นซ้ำ); แท็บผลจาก restore ที่ผู้ใช้กดตื่นแล้วแท็บเปลี่ยนหน้า → record เลื่อนตาม (ไม่ค้างคู่ซ้ำหลับ+ตื่น); `setLiveBinding` ธง s ยึด binding เดิมเท่านั้น — กดตื่นแล้ว `s` ไม่ถูกปลูกคืน; normalizeUrl เรียง param → ลำดับต่างกัน = key เดียว; dedupe: แท็บ Untitled ที่ restore สร้าง (binding มี urlKey) → กดเปิดซ้ำ skip ไม่สร้างซ้ำ | L14/L17/dedupe |
+| T24 (v3.5) volatile params: `normalizeUrl` ตัด `draftId`/`tab` (SPA state ไม่ใช่ตัวระบุเอกสาร) → `/settings?tab=servers` = `/settings`, `/new-session?draftId=<uuid>` = `/new-session`; boot migration (`#renormalizeStoredTabs`) ยุบแถวฝาแฝดเดิมให้อัตโนมัติ; param ที่ระบุเอกสารจริง (`?v=`, `?id=`) ยังแยก | dedupe/tests |
 
 ข้อระวังเทียบเดิม: e2e restore flow รันภายใต้ fake chrome ได้ครบ (ตรรกะ diff ของ diff-engine เดิมถูกเทียบโดย restore-engine แทน)
 

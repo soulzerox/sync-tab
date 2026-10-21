@@ -1,984 +1,463 @@
 /**
- * SyncTab Popup UI Controller (High-Performance 60 FPS View & Intent Dispatcher)
- * Features: Visual Tab Group Clustering, Window Accordion Collapse/Expand,
- * Inline Window Renaming, Scroll Position Retention, and Event Delegation.
+ * SyncTab Group Sync — popup (pure view + typed RPC, SOT v3.0.0 §7)
+ * ห้ามแตะ chrome.* โดยตรง — สื่อสารผ่าน runtime messages เท่านั้น
  */
 
-import { MESSAGE_TYPES } from "../shared/messages.js";
+import { MSG, THEME_VALUES } from "../shared/messages.js";
 import {
-  formatArchiveTimestamp,
-  sortClosedWindowsNewestFirst
-} from "../shared/closed-window-order.js";
-import { clusterTabsByGroup } from "../shared/tab-group-clustering.js";
-import { titleFromUrl } from "../background/url-sanitizer.js";
+  filterGroupCards,
+  splitTabsByState,
+  buildStats,
+  formatRelativeTime,
+  resolveTheme,
+  groupDeleteConfirmMessage
+} from "../shared/ui-utils.js";
 
-// DOM References
-const activeWindowsList = document.getElementById("active-windows-list");
-const closedWindowsList = document.getElementById("closed-windows-list");
-const recoveryCheckpointsList = document.getElementById("recovery-checkpoints-list");
-const recoveryCheckpointCount = document.getElementById("recovery-checkpoint-count");
-const recoveryAlert = document.getElementById("recovery-alert");
-const recoveryAlertCopy = document.getElementById("recovery-alert-copy");
-const btnRestoreAlertCheckpoint = document.getElementById("btn-restore-alert-checkpoint");
-const btnDismissRecoveryAlert = document.getElementById("btn-dismiss-recovery-alert");
-const activeWindowCount = document.getElementById("active-window-count");
-const closedWindowCount = document.getElementById("closed-window-count");
-const btnCollapseAllActive = document.getElementById("btn-collapse-all-active");
-const btnCollapseAllClosed = document.getElementById("btn-collapse-all-closed");
+const API = chrome;
 
-const searchInput = document.getElementById("search-input");
-const clearSearchBtn = document.getElementById("btn-clear-search");
+// ---------- primitives ----------
+const $ = sel => document.querySelector(sel);
+const listEl = $("#list");
+const toastHost = $("#toast-host");
 
-// Storage status elements
-const statusDot = document.getElementById("status-dot");
-const statusText = document.getElementById("status-text");
-const setupGuideBox = document.getElementById("setup-guide-box");
-const btnCopyCmd = document.getElementById("btn-copy-cmd");
-const btnTestConnection = document.getElementById("btn-test-connection");
-
-// Action buttons
-const btnManualBackup = document.getElementById("btn-manual-backup");
-const btnExportMenu = document.getElementById("btn-export-menu");
-const btnSettingsToggle = document.getElementById("btn-settings-toggle");
-
-// Modals
-const settingsModal = document.getElementById("settings-modal");
-const exportModal = document.getElementById("export-modal");
-const btnCloseSettings = document.getElementById("btn-close-settings");
-const btnCloseExport = document.getElementById("btn-close-export");
-const btnSaveSettings = document.getElementById("btn-save-settings");
-const btnExportJson = document.getElementById("btn-export-json");
-const btnExportMd = document.getElementById("btn-export-md");
-const importFileInput = document.getElementById("import-file-input");
-
-// Settings form inputs
-const setAutoRestore = document.getElementById("set-auto-restore");
-const setLazyRestore = document.getElementById("set-lazy-restore");
-const setAutoClean = document.getElementById("set-auto-clean");
-const setStripTracking = document.getElementById("set-strip-tracking");
-const setRetention = document.getElementById("set-retention");
-const setBlacklistDomains = document.getElementById("set-blacklist-domains");
-
-// In-Memory UI State
-let currentState = null;
-let loadStateRequestId = 0;
-let currentSearchQuery = "";
-const selectedTabsMap = new Map(); // uuid -> Set<number>
-const collapsedWindows = new Set(); // Set of window UUIDs
-const collapsedGroups = new Set();  // Set of `${windowUuid}_${groupKey}`
-let isActivelyEditing = false;
-let searchDebounceTimer = null;
-
-/**
- * Displays a non-blocking toast notification.
- * @param {string} message
- */
-function showToast(message) {
-  const container = document.getElementById("toast-container");
-  if (!container) return;
-  const toast = document.createElement("div");
-  toast.className = "toast";
-  toast.textContent = message;
-  container.appendChild(toast);
-  setTimeout(() => {
-    toast.remove();
-  }, 2400);
-}
-
-/**
- * Sends a typed RPC message to background service worker.
- * @param {string} type
- * @param {any} [payload]
- * @returns {Promise<any>}
- */
-async function sendBackgroundMessage(type, payload = {}) {
-  if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
-    return { success: false, error: "Extension API unavailable" };
-  }
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type, payload }, (response) => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        resolve({ success: false, error: runtimeError.message || "Extension request failed" });
-        return;
-      }
-      resolve(response || { success: false, error: "No response from background service worker" });
+function send(message) {
+  return new Promise(resolve => {
+    API.runtime.sendMessage(message, response => {
+      void chrome.runtime.lastError;
+      resolve(response ?? { ok: false, error: "no-response" });
     });
   });
 }
 
-/**
- * Fetches state from background and renders UI with scroll position retention.
- */
-async function loadState() {
-  if (isActivelyEditing) return; // Prevent disrupting active inline typing
+function toast(text, { warn = false, ms = 2500 } = {}) {
+  const el = document.createElement("div");
+  el.className = "toast" + (warn ? " warn" : "");
+  el.textContent = text;
+  toastHost.append(el);
+  setTimeout(() => {
+    el.classList.add("gone");
+    setTimeout(() => el.remove(), 220);
+  }, ms);
+}
 
-  const scrollContainer = document.querySelector(".content-scroll");
-  const prevScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+// ---------- confirm dialog ใน popup (window.confirm ใน popup จะถูก popup ตัดขอบจนมองไม่เห็น) ----------
+const confirmHost = $("#confirm-host");
+const confirmTitleEl = $("#confirm-title");
+const confirmDetailEl = $("#confirm-detail");
+const confirmOkEl = $("#confirm-ok");
+const confirmCancelEl = $("#confirm-cancel");
+let confirmResolve = null;
 
-  const requestId = ++loadStateRequestId;
-  const res = await sendBackgroundMessage(MESSAGE_TYPES.GET_STATE);
-  // Multiple UI actions/storage notifications can overlap. Ignore an older response
-  // so stale state never overwrites a more recent render.
-  if (requestId !== loadStateRequestId) return;
-  if (res && res.success && res.data) {
-    currentState = res.data;
-    pruneUiState(currentState);
-    renderStatus(currentState.nativeStatus);
-    renderActiveWindows(currentState.activeWindows);
-    renderRecoveryCheckpoints(currentState.recoveryCheckpoints, currentState.recoveryAlert);
-    renderClosedWindows(currentState.closedWindows);
-    populateSettings(currentState.settings);
+function confirmModal(title, detail, { okLabel = "ยืนยัน" } = {}) {
+  confirmTitleEl.textContent = title;
+  confirmDetailEl.textContent = detail ?? "";
+  confirmOkEl.textContent = okLabel;
+  confirmHost.hidden = false;
+  confirmOkEl.focus();
+  return new Promise(resolve => { confirmResolve = resolve; });
+}
 
-    if (currentSearchQuery) {
-      applyLiveSearchFilter();
-    }
+function settleConfirm(value) {
+  if (!confirmResolve) return;
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  confirmHost.hidden = true;
+  resolve(value);
+}
 
-    // Restore exact scroll position to eliminate bouncing to top
-    if (scrollContainer) {
-      scrollContainer.scrollTop = prevScrollTop;
-    }
+confirmOkEl.addEventListener("click", () => settleConfirm(true));
+confirmCancelEl.addEventListener("click", () => settleConfirm(false));
+confirmHost.querySelector(".modal-backdrop").addEventListener("click", () => settleConfirm(false));
+window.addEventListener("keydown", event => {
+  if (!confirmResolve) return;
+  if (event.key === "Escape") { event.preventDefault(); settleConfirm(false); }
+});
+
+// escape ตัวหนังสือของผู้ใช้ทุกตำแหน่ง (title อาจมี <script> ปลอมจากหน้าเว็บก็ได้)
+function esc(text) {
+  const div = document.createElement("div");
+  div.textContent = String(text ?? "");
+  return div.innerHTML.replace(/"/g, "&quot;");
+}
+
+function letter(text) {
+  for (const ch of String(text ?? "")) {
+    if (/[A-Za-z0-9ก-๙]/.test(ch)) return ch.toUpperCase();
+  }
+  return "?";
+}
+
+const ICONS = {
+  trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>',
+  pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  chev: '<path d="m6 9 6 6 6-6"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  breadcrumb: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>'
+};
+
+function svg(paths, cls = "") {
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+}
+
+// ---------- state ----------
+/** @type {{ groups: Record<string, any>, themePreference: string, lastScanAt: number|null }} */
+let state = { groups: {}, themePreference: THEME_VALUES.AUTO, lastScanAt: null };
+let currentTheme = "dark";
+let restoringGroups = new Set(); // ชื่อกลุ่มที่กำลังเปิด (busy ปุ่ม)
+
+// ---------- theme ----------
+function applyTheme(pref) {
+  currentTheme = resolveTheme(pref, window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.body.classList.toggle("theme-light", currentTheme === "light");
+  $("#theme-icon").innerHTML = currentTheme === "dark" ? ICONS.moon : ICONS.sun;
+}
+
+$("#theme-toggle").addEventListener("click", async () => {
+  const next = currentTheme === "dark" ? THEME_VALUES.LIGHT : THEME_VALUES.DARK;
+  state.themePreference = next;
+  applyTheme(next);
+  await send({ type: MSG.SET_THEME, payload: { theme: next } });
+});
+
+// ---------- data flow ----------
+async function refresh() {
+  const response = await send({ type: MSG.GET_STATE });
+  if (!response?.ok) {
+    toast("ขอสถานะจาก extension ไม่สำเร็จ — ลองเปิด popup ใหม่", { warn: true });
+    return;
+  }
+  state = response;
+  applyTheme(state.themePreference ?? THEME_VALUES.AUTO);
+  render();
+  if (state.showMigrationNotice) {
+    toast("อัปเกรดเป็น Group Sync แล้ว — ข้อมูลระบบเก่า (สำรองหน้าต่าง) ถูกล้างออกแล้ว", { ms: 4000 });
+  }
+  if (state.restoredSyncBackup) {
+    toast("กู้คืนกลุ่มและแท็บจากที่สำรองอัตโนมัติ (sync ของบัญชี) แล้ว", { ms: 4000 });
   }
 }
 
-/** Drop UI-only selections/collapse keys for windows and tabs that no longer exist. */
-function pruneUiState(state) {
-  const active = Object.values(state?.activeWindows || {});
-  const closed = Object.values(state?.closedWindows || {});
-  const allWindows = [...active, ...closed];
-  const validUuids = new Set(allWindows.map(win => win.windowUuid));
-  const validClosedTabs = new Map(closed.map(win => [
-    win.windowUuid,
-    new Set((win.tabs || []).map((tab, index) => Number.isInteger(tab.index) ? tab.index : index))
-  ]));
-  const validGroupIds = new Set();
+// ---------- render ----------
+function render() {
+  renderStats();
+  renderList();
+  renderFooter();
+}
 
-  for (const win of allWindows) {
-    for (const group of clusterTabsByGroup(win.tabs || []).groups) {
-      validGroupIds.add(`${win.windowUuid}_${group.key}`);
-    }
+function renderStats() {
+  const stats = buildStats(state.groups);
+  $("#stat-groups").textContent = String(stats.groups);
+  $("#stat-tabs").textContent = String(stats.tabs);
+  $("#stat-awake").textContent = String(stats.awake);
+}
+
+function renderFooter() {
+  $("#sync-time").textContent = formatRelativeTime(state.lastScanAt, Date.now()) ?? "ยังไม่สแกน";
+}
+
+function renderList() {
+  const query = $("#search").value;
+  const cards = filterGroupCards(state.groups, query);
+  listEl.replaceChildren();
+
+  if (cards.length === 0) {
+    listEl.innerHTML = state.groups && Object.keys(state.groups).length
+      ? `<div class="empty"><div class="glyph">${svg(ICONS.breadcrumb)}</div><b>ไม่พบกลุ่มที่ตรงกับคำค้น</b><small>ลองค้นจากชื่อกลุ่ม ชื่อหน้า หรือ URL</small></div>`
+      : `<div class="empty"><div class="glyph">${svg(ICONS.breadcrumb)}</div><b>ยังไม่มีกลุ่มที่ถูกจับ</b><small>ลากแท็บเข้ากลุ่มที่ตั้งชื่อใน Edge เพื่อเริ่มซิงก์อัตโนมัติ</small></div>`;
+    return;
   }
-  for (const uuid of collapsedWindows) {
-    if (!validUuids.has(uuid)) collapsedWindows.delete(uuid);
-  }
-  for (const groupId of collapsedGroups) {
-    if (!validGroupIds.has(groupId)) collapsedGroups.delete(groupId);
-  }
-  for (const [uuid, selected] of selectedTabsMap) {
-    const validIndices = validClosedTabs.get(uuid);
-    if (!validIndices) {
-      selectedTabsMap.delete(uuid);
-      continue;
-    }
-    for (const index of selected) {
-      if (!validIndices.has(index)) selected.delete(index);
-    }
-    if (selected.size === 0) selectedTabsMap.delete(uuid);
+
+  for (const { name, record } of cards) {
+    listEl.append(buildCard(name, record));
   }
 }
 
-function formatCheckpointTime(timestamp, lastVerifiedAt = timestamp) {
-  const date = new Date(timestamp);
-  const ageMinutes = Math.max(0, Math.floor((Date.now() - lastVerifiedAt) / 60_000));
-  const age = ageMinutes < 1 ? "checked just now"
-    : ageMinutes < 60 ? `checked ${ageMinutes} minute${ageMinutes === 1 ? "" : "s"} ago`
-      : `checked ${Math.floor(ageMinutes / 60)} hour${Math.floor(ageMinutes / 60) === 1 ? "" : "s"} ago`;
-  return `${date.toLocaleString()} · ${age}`;
+function faviconCell(tab) {
+  if (tab.favIconUrl) {
+    const img = document.createElement("img");
+    img.src = tab.favIconUrl;
+    img.alt = "";
+    img.loading = "lazy";
+    img.onerror = () => {
+      const span = document.createElement("span");
+      span.textContent = letter(tab.title);
+      img.replaceWith(span);
+    };
+    const cell = document.createElement("span");
+    cell.className = "favicon";
+    cell.append(img);
+    return cell;
+  }
+  const cell = document.createElement("span");
+  cell.className = "favicon";
+  cell.style.background = "var(--surface-2)";
+  cell.style.color = "var(--muted)";
+  cell.textContent = letter(tab.title);
+  return cell;
 }
 
-function renderRecoveryCheckpoints(checkpoints = [], alert = null) {
-  const items = Array.isArray(checkpoints) ? checkpoints : [];
-  recoveryCheckpointCount.textContent = String(items.length);
-  recoveryCheckpointsList.innerHTML = "";
-  if (items.length === 0) {
-    recoveryCheckpointsList.innerHTML = '<div class="empty-state">No recovery checkpoints yet</div>';
-  } else {
-    const fragment = document.createDocumentFragment();
-    items.forEach(checkpoint => {
-      const card = document.createElement("div");
-      card.className = "recovery-checkpoint-card";
-      card.innerHTML = `
-        <div class="recovery-checkpoint-meta">
-          <strong>${escapeHtml(formatCheckpointTime(checkpoint.timestamp, checkpoint.lastVerifiedAt))}</strong>
-          <span>${Number(checkpoint.totalTabs) || 0} tabs · ${Number(checkpoint.totalWindows) || 0} windows</span>
-        </div>
-        <button class="btn-secondary btn-sm" data-action="restore-recovery" data-timestamp="${Number(checkpoint.timestamp)}">Restore missing tabs</button>
-      `;
-      fragment.appendChild(card);
-    });
-    recoveryCheckpointsList.appendChild(fragment);
-  }
+function buildCard(name, record) {
+  const details = document.createElement("details");
+  details.className = "card";
+  details.style.setProperty("--g", `var(--${record.color})`);
 
-  recoveryAlert.classList.toggle("hidden", !alert);
-  if (alert) {
-    recoveryAlertCopy.textContent = `SyncTab noticed ${alert.lostTabs} tabs missing (${alert.currentTabCount} now, ${alert.previousTabCount} in the last safe checkpoint). The checkpoint list is being held until you restore or dismiss this notice.`;
-    btnRestoreAlertCheckpoint.dataset.timestamp = String(alert.checkpointTimestamp);
+  const liveCount = Object.values(record.tabs).filter(t => t.liveCount > 0).length;
+  const totalCount = Object.keys(record.tabs).length;
+  const idleCount = totalCount - liveCount;
+  const windowCount = (record.liveWindowIds ?? []).length;
+
+  // ---- summary ----
+  const summary = document.createElement("summary");
+  summary.innerHTML = `
+    <span class="chev">${svg(ICONS.chev)}</span>
+    <span class="chip" title="${esc(name)}">${esc(name)}</span>
+    <span class="pill ${liveCount > 0 ? "live" : ""}"><b>${liveCount}</b> ตื่น / ${totalCount}</span>
+    <span class="pill">${windowCount > 0 ? `${windowCount} หน้าต่าง` : "ไม่ได้เปิด"}</span>`;
+  const renameBtn = document.createElement("button");
+  renameBtn.className = "iconbtn rename";
+  renameBtn.setAttribute("aria-label", `เปลี่ยนชื่อกลุ่ม ${name}`);
+  renameBtn.title = "เปลี่ยนชื่อกลุ่ม";
+  renameBtn.innerHTML = svg(ICONS.pencil);
+  renameBtn.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    startRename(summary, renameBtn, name);
+  });
+  summary.append(renameBtn);
+  details.append(summary);
+
+  // ---- rows ----
+  const { live, idle } = splitTabsByState(record);
+  const sect = document.createElement("div");
+  sect.className = "sect";
+  if (live.length > 0) {
+    sect.append(sectLabel("ตื่นอยู่บนเบราว์เซอร์", live.length));
+    for (const tab of live) sect.append(buildRow(tab, { live: true, groupName: name }));
   }
+  if (idle.length > 0) {
+    sect.append(sectLabel(live.length > 0 ? "จำไว้ (หลับ)" : "จำไว้ (หลับ — กลุ่มปิดอยู่)", idle.length));
+    for (const tab of idle) sect.append(buildRow(tab, { live: false, groupName: name }));
+  }
+  details.append(sect);
+
+  // ---- actions ----
+  const acts = document.createElement("div");
+  acts.className = "acts";
+  const selBtn = document.createElement("button");
+  selBtn.className = "btn";
+  selBtn.disabled = true;
+  selBtn.textContent = "เปิดที่เลือก (0)";
+  selBtn.addEventListener("click", () => openTabs(name, selectedUrls(details, true)));
+
+  const delSelBtn = document.createElement("button");
+  delSelBtn.className = "btn danger-sel";
+  delSelBtn.hidden = true;
+  delSelBtn.setAttribute("aria-label", `ลบแท็บที่เลือกออกจากกลุ่ม ${name}`);
+  delSelBtn.title = "ลบแท็บที่จำไว้ที่เลือก (แท็บบนเบราว์เซอร์ไม่ถูกแตะ)";
+  delSelBtn.textContent = "ลบที่เลือก (0)";
+  delSelBtn.addEventListener("click", () => deleteTabsSelected(name, collectedSelection(details)));
+
+  const allBtn = document.createElement("button");
+  allBtn.className = "btn primary";
+  allBtn.textContent = `เปิดทั้งหมด ${idleCount}`;
+  allBtn.disabled = idleCount === 0;
+  allBtn.addEventListener("click", () => openTabs(name, []));
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "btn ghost-danger";
+  delBtn.setAttribute("aria-label", `ลบกลุ่ม ${name} จาก extension`);
+  delBtn.title = "ลบกลุ่มจากคลัง (ไม่แตะแท็บบนเบราว์เซอร์)";
+  delBtn.innerHTML = svg(ICONS.trash);
+  delBtn.addEventListener("click", () => deleteGroup(name, windowCount > 0));
+
+  acts.append(selBtn, delSelBtn, allBtn, delBtn);
+  details.append(acts);
+
+  // เปลี่ยนของ checkbox → ปุ่มเปิดที่เลือก + ลบที่เลือก
+  details.addEventListener("change", () => {
+    const n = collectedSelection(details).length;
+    selBtn.disabled = n === 0;
+    selBtn.textContent = `เปิดที่เลือก (${n})`;
+    delSelBtn.hidden = n === 0;
+    delSelBtn.textContent = `ลบที่เลือก (${n})`;
+  });
+
+  return details;
 }
 
-/**
- * Updates status banner indicator.
- */
-function renderStatus(status) {
-  if (!status) return;
-
-  if (status.connected && status.driver === "sqlite_native") {
-    statusDot.className = "dot dot-green";
-    statusText.textContent = `🟢 SQLite Drive: Connected (${status.path})`;
-    setupGuideBox.classList.add("hidden");
-  } else {
-    statusDot.className = "dot dot-yellow";
-    statusText.textContent = "🟡 Local Storage Mode (SQLite Bridge Not Connected)";
-    setupGuideBox.classList.remove("hidden");
-  }
+function sectLabel(text, count, suffix = "") {
+  const el = document.createElement("div");
+  el.className = "sect-label";
+  el.innerHTML = `${esc(text)} <span class="count">${count}</span>${esc(suffix)}`;
+  return el;
 }
 
-const DEFAULT_FAVICON = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>'
-);
+const selectedUrls = (cardEl, checkedOnly) => collectedSelection(cardEl);
+const collectedSelection = cardEl => [...cardEl.querySelectorAll(".cbx:checked")].map(cb => cb.dataset.url);
 
-/**
- * Builds a tab row element.
- */
-function createTabRowElement(tab, windowUuid, isEditable) {
+function buildRow(tab, { live, groupName }) {
   const row = document.createElement("div");
-  row.className = "tab-row";
-  const tabIndex = Number.isInteger(tab.index) ? tab.index : 0;
-  row.dataset.tabIndex = String(tabIndex);
-  row.dataset.windowUuid = windowUuid;
-  row.dataset.searchText = `${tab.title || ""} ${tab.url || ""}`.toLowerCase();
+  row.className = "row";
+  row.dataset.url = tab.url;
 
-  const isChecked = selectedTabsMap.get(windowUuid)?.has(tabIndex) || false;
-  const checkboxHtml = isEditable
-    ? `<input type="checkbox" class="tab-select" data-uuid="${escapeHtml(windowUuid)}" data-idx="${tabIndex}" ${isChecked ? "checked" : ""}>`
-    : "";
+  const cbx = document.createElement("input");
+  cbx.type = "checkbox";
+  cbx.className = "cbx" + (live ? " live-locked" : "");
+  cbx.disabled = live;
+  if (live) { cbx.setAttribute("aria-label", "แท็บที่กำลังเปิด เลือกเปิดซ้ำไม่ได้"); } else {
+    cbx.dataset.url = tab.url;
+    cbx.setAttribute("aria-label", `เลือกแท็บ ${tab.title}`);
+  }
 
-  const deleteBtnHtml = isEditable
-    ? `<button class="btn-tab-delete" data-action="delete-tab" data-uuid="${escapeHtml(windowUuid)}" data-idx="${tabIndex}" title="Remove tab">✕</button>`
-    : "";
+  row.append(cbx);
+  if (live) {
+    const dot = document.createElement("span");
+    dot.className = "dotlive";
+    row.append(dot);
+  } else {
+    const moon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    moon.setAttribute("viewBox", "0 0 24 24");
+    moon.setAttribute("class", "moon");
+    moon.innerHTML = ICONS.moon;
+    row.append(moon);
+  }
+  row.append(faviconCell(tab));
 
-  const rawFavicon = tab.favIconUrl || "";
-  const faviconUrl = rawFavicon.startsWith("http") || rawFavicon.startsWith("data:")
-    ? escapeHtml(rawFavicon)
-    : DEFAULT_FAVICON;
+  const t = document.createElement("div");
+  t.className = "t";
+  t.innerHTML = `<div class="a">${esc(tab.title || tab.url)}</div><div class="u">${esc(shortUrl(tab.url))}</div>`;
+  row.append(t);
 
-  row.innerHTML = `
-    <div class="tab-info">
-      ${checkboxHtml}
-      <img class="tab-favicon" src="${faviconUrl}" alt="">
-      <span class="tab-title" title="${escapeHtml(tab.title)} — ${escapeHtml(tab.url)}">${escapeHtml(typeof tab.title === "string" && tab.title.trim() && tab.title.trim().toLowerCase() !== "untitled" ? tab.title : titleFromUrl(tab.url))}</span>
-      ${tab.pinned ? '<span class="tab-tag tag-pinned">Pinned</span>' : ""}
-    </div>
-    ${deleteBtnHtml}
-  `;
-
+  if (!live) {
+    const del = document.createElement("button");
+    del.className = "del";
+    del.setAttribute("aria-label", `ลบแท็บ ${tab.title}`);
+    del.title = "ลบจากคลัง";
+    del.innerHTML = svg(ICONS.trash);
+    del.addEventListener("click", () => deleteTab(groupName, tab.url, tab.title));
+    row.append(del);
+  }
   return row;
 }
 
-/**
- * Builds the clustered tab group DOM structure inside a window body.
- */
-function buildWindowBodyFragment(win, isClosed) {
-  const container = document.createElement("div");
-  container.className = "window-body";
-
-  const { groups, ungrouped } = clusterTabsByGroup(win.tabs);
-
-  // 1. Render Grouped Tab Buckets
-  for (const group of groups) {
-    const groupKeyId = `${win.windowUuid}_${group.key}`;
-    const isGroupCollapsed = collapsedGroups.has(groupKeyId);
-
-    const groupBox = document.createElement("div");
-    groupBox.className = `tab-group-box color-${group.color}${isGroupCollapsed ? " collapsed" : ""}`;
-    groupBox.dataset.groupKey = groupKeyId;
-
-    groupBox.innerHTML = `
-      <div class="tab-group-header" data-action="toggle-group" data-group-id="${escapeHtml(groupKeyId)}">
-        <div class="group-left">
-          <span class="group-dot"></span>
-          <span class="group-title">${escapeHtml(group.title)}</span>
-          <span class="group-badge">${group.tabs.length}</span>
-        </div>
-        <span class="group-chevron">▾</span>
-      </div>
-      <div class="group-body"></div>
-    `;
-
-    const groupBody = groupBox.querySelector(".group-body");
-    for (const tab of group.tabs) {
-      groupBody.appendChild(createTabRowElement(tab, win.windowUuid, isClosed));
-    }
-
-    container.appendChild(groupBox);
-  }
-
-  // 2. Render Ungrouped Tabs
-  if (ungrouped.length > 0) {
-    for (const tab of ungrouped) {
-      container.appendChild(createTabRowElement(tab, win.windowUuid, isClosed));
-    }
-  }
-
-  return container;
-}
-
-/**
- * Renders Active Windows (Read-Only Mirror with Accordion & Rename).
- */
-function renderActiveWindows(activeMap) {
-  const wins = Object.values(activeMap || {});
-  activeWindowCount.textContent = String(wins.length);
-  activeWindowsList.innerHTML = "";
-
-  if (wins.length === 0) {
-    activeWindowsList.innerHTML = '<div class="empty-state">No active windows detected</div>';
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-
-  wins.forEach((win, idx) => {
-    const isCollapsed = collapsedWindows.has(win.windowUuid);
-    const card = document.createElement("div");
-    card.className = `window-card${isCollapsed ? " collapsed" : ""}`;
-    card.dataset.windowUuid = win.windowUuid;
-
-    const defaultName = `Active Window ${idx + 1}`;
-    const name = win.customName || defaultName;
-
-    card.innerHTML = `
-      <div class="window-card-header" data-action="toggle-window" data-uuid="${escapeHtml(win.windowUuid)}">
-        <div class="win-title-area">
-          <span class="chevron-icon">▾</span>
-          <span class="win-title-text" data-action="toggle-window" data-uuid="${escapeHtml(win.windowUuid)}" title="Click header to collapse/expand">${escapeHtml(name)}</span>
-          <button class="btn-rename-trigger" data-action="rename-window" data-uuid="${escapeHtml(win.windowUuid)}" title="Rename Window">✏️</button>
-          <span class="badge badge-primary">${win.tabs.length} tabs</span>
-        </div>
-      </div>
-    `;
-
-    card.appendChild(buildWindowBodyFragment(win, false));
-    fragment.appendChild(card);
-  });
-
-  activeWindowsList.appendChild(fragment);
-}
-
-/**
- * Renders Closed Windows Archive (Editable, Groups, Pinned Templates, Accordion).
- */
-function renderClosedWindows(closedMap) {
-  const wins = sortClosedWindowsNewestFirst(Object.values(closedMap || {}));
-  closedWindowCount.textContent = String(wins.length);
-  closedWindowsList.innerHTML = "";
-
-  if (wins.length === 0) {
-    closedWindowsList.innerHTML = '<div class="empty-state">No closed windows in archive</div>';
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-
-  wins.forEach((win, idx) => {
-    const isCollapsed = collapsedWindows.has(win.windowUuid);
-    const card = document.createElement("div");
-    card.className = `window-card${isCollapsed ? " collapsed" : ""}`;
-    card.dataset.windowUuid = win.windowUuid;
-
-    const defaultName = `Closed Window ${idx + 1}`;
-    const name = win.customName || defaultName;
-    const pinIcon = win.isPinnedTemplate ? "📌" : "📍";
-    const pinTitle = win.isPinnedTemplate ? "Pinned Template (may be pruned by archive limit)" : "Pin as Template";
-    const archiveTimestamp = formatArchiveTimestamp(win);
-
-    card.innerHTML = `
-      <div class="window-card-header" data-action="toggle-window" data-uuid="${escapeHtml(win.windowUuid)}">
-        <div class="win-title-area">
-          <span class="chevron-icon">▾</span>
-          <span class="win-title-copy">
-            <span class="win-title-text" data-action="toggle-window" data-uuid="${escapeHtml(win.windowUuid)}" title="Click header to collapse/expand">${escapeHtml(name)}</span>
-            <span class="archive-time" title="วันที่และเวลาที่ปิดหน้าต่าง">${escapeHtml(archiveTimestamp)}</span>
-          </span>
-          <button class="btn-rename-trigger" data-action="rename-window" data-uuid="${escapeHtml(win.windowUuid)}" title="Rename Window">✏️</button>
-          <span class="badge badge-secondary">${win.tabs.length} tabs</span>
-        </div>
-        <div class="win-actions">
-          <button class="icon-btn btn-pin" data-action="toggle-pin" data-uuid="${escapeHtml(win.windowUuid)}" title="${pinTitle}">${pinIcon}</button>
-          <button class="btn-sync" data-action="sync-window" data-uuid="${escapeHtml(win.windowUuid)}" title="Sync missing tabs to current window">🔄 Sync</button>
-          <button class="icon-btn btn-delete-win" data-action="delete-window" data-uuid="${escapeHtml(win.windowUuid)}" title="Delete Window Archive">🗑️</button>
-        </div>
-      </div>
-    `;
-
-    card.appendChild(buildWindowBodyFragment(win, true));
-    fragment.appendChild(card);
-  });
-
-  closedWindowsList.appendChild(fragment);
-}
-
-// -------------------------------------------------------------
-// High-Performance Delegated Event Handling (Zero Event Thrashing)
-// -------------------------------------------------------------
-
-function handleWindowListEvents(e, isClosedList) {
-  const target = e.target;
-
-  // 1. Rename Trigger (Clicking ✏️)
-  const renameBtn = target.closest('[data-action="rename-window"]');
-  if (renameBtn) {
-    e.preventDefault();
-    e.stopPropagation();
-    const uuid = renameBtn.dataset.uuid;
-    startInlineRename(uuid, renameBtn);
-    return;
-  }
-
-  // 2. Pin Template
-  const pinBtn = target.closest('[data-action="toggle-pin"]');
-  if (pinBtn) {
-    e.preventDefault();
-    e.stopPropagation();
-    const uuid = pinBtn.dataset.uuid;
-    sendBackgroundMessage(MESSAGE_TYPES.TOGGLE_PIN_TEMPLATE, { windowUuid: uuid }).then(() => {
-      showToast("Template status updated");
-      loadState();
-    });
-    return;
-  }
-
-  // 3. Sync Window
-  const syncBtn = target.closest('[data-action="sync-window"]');
-  if (syncBtn) {
-    e.preventDefault();
-    e.stopPropagation();
-    const uuid = syncBtn.dataset.uuid;
-    triggerSyncWindow(uuid);
-    return;
-  }
-
-  // 4. Delete Window Archive
-  const deleteWinBtn = target.closest('[data-action="delete-window"]');
-  if (deleteWinBtn) {
-    e.preventDefault();
-    e.stopPropagation();
-    const uuid = deleteWinBtn.dataset.uuid;
-    if (confirm("Delete this closed window archive?")) {
-      sendBackgroundMessage(MESSAGE_TYPES.DELETE_CLOSED_WINDOW, { windowUuid: uuid }).then(() => {
-        showToast("Window archive deleted");
-        loadState();
-      });
-    }
-    return;
-  }
-
-  // 5. Delete Single Tab
-  const deleteTabBtn = target.closest('[data-action="delete-tab"]');
-  if (deleteTabBtn) {
-    e.preventDefault();
-    e.stopPropagation();
-    const uuid = deleteTabBtn.dataset.uuid;
-    const tabIndex = parseInt(deleteTabBtn.dataset.idx, 10);
-    sendBackgroundMessage(MESSAGE_TYPES.DELETE_CLOSED_TAB, { windowUuid: uuid, tabIndex }).then(() => {
-      showToast("Tab removed from archive");
-      loadState();
-    });
-    return;
-  }
-
-  // 6. Tab Group Accordion Toggle
-  const groupHeader = target.closest('[data-action="toggle-group"]');
-  if (groupHeader) {
-    e.preventDefault();
-    e.stopPropagation();
-    const groupId = groupHeader.dataset.groupId;
-    const groupBox = groupHeader.closest(".tab-group-box");
-    if (groupBox) {
-      if (collapsedGroups.has(groupId)) {
-        collapsedGroups.delete(groupId);
-        groupBox.classList.remove("collapsed");
-      } else {
-        collapsedGroups.add(groupId);
-        groupBox.classList.add("collapsed");
-      }
-    }
-    return;
-  }
-
-  // 7. Window Card Accordion Toggle (Clicking anywhere on the header)
-  const cardHeader = target.closest(".window-card-header");
-  if (cardHeader) {
-    e.preventDefault();
-    e.stopPropagation();
-    const card = cardHeader.closest(".window-card");
-    const uuid = card?.dataset.windowUuid;
-    if (uuid && card) {
-      if (collapsedWindows.has(uuid)) {
-        collapsedWindows.delete(uuid);
-        card.classList.remove("collapsed");
-      } else {
-        collapsedWindows.add(uuid);
-        card.classList.add("collapsed");
-      }
-    }
+function shortUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.host.length > 46 ? u.host : u.host + u.pathname.replace(/\/$/, "");
+  } catch {
+    return url;
   }
 }
 
-// Attach Event Delegation on Containers
-activeWindowsList.addEventListener("click", (e) => handleWindowListEvents(e, false));
-closedWindowsList.addEventListener("click", (e) => handleWindowListEvents(e, true));
+// ---------- actions ----------
+async function openTabs(groupName, urls) {
+  const card = [...listEl.children].find(el => el.querySelector(".chip")?.textContent === groupName);
+  const buttons = card ? [...card.querySelectorAll(".btn")] : [];
+  buttons.forEach(b => b.classList.add("busy"));
 
-// Tab Selection Change Delegation
-closedWindowsList.addEventListener("change", (e) => {
-  if (e.target.classList.contains("tab-select")) {
-    const uuid = e.target.dataset.uuid;
-    const idx = parseInt(e.target.dataset.idx, 10);
-    if (!selectedTabsMap.has(uuid)) {
-      selectedTabsMap.set(uuid, new Set());
-    }
-    const set = selectedTabsMap.get(uuid);
-    if (e.target.checked) set.add(idx);
-    else set.delete(idx);
+  const response = await send({ type: MSG.OPEN_TABS, payload: { groupName, urls } });
+
+  buttons.forEach(b => b.classList.remove("busy"));
+
+  if (!response?.ok) {
+    if (response?.error === "busy") { toast("มีการเปิดกลุ่มนี้ทำงานอยู่ — รอให้เสร็จก่อนแล้วลองอีกที"); return; }
+    if (response?.error === "no-record") { toast("กลุ่มนี้ถูกลบไปแล้ว", { warn: true }); await refresh(); return; }
+    toast(`เปิดไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true });
+    return;
   }
-});
+  const { opened, skipped } = response;
+  toast(
+    opened > 0
+      ? `เปิดแล้ว ${opened} แท็บ (โหมดหลับ — คลิกค่อยโหลด)` + (skipped > 0 ? ` · ข้ามที่เปิดอยู่แล้ว ${skipped}` : "")
+      : "ไม่มีแท็บใหม่ที่ต้องเปิด (ตัวที่เลือกเปิดอยู่แล้ว)"
+  );
+  setTimeout(refresh, 900);
+}
 
-/**
- * Handles inline custom window renaming.
- */
-function startInlineRename(uuid, element) {
-  const card = element.closest(".window-card");
-  const titleTextSpan = card?.querySelector(".win-title-text");
-  if (!titleTextSpan) return;
+async function deleteGroup(groupName, isLive) {
+  const record = state.groups[groupName];
+  const tabsCount = record ? Object.keys(record.tabs).length : 0;
+  const ok = await confirmModal("ลบกลุ่มจากคลัง?", groupDeleteConfirmMessage(groupName, tabsCount, isLive), { okLabel: "ลบกลุ่ม" });
+  if (!ok) return;
+  const response = await send({ type: MSG.DELETE_GROUP, payload: { groupName } });
+  if (!response?.ok) { toast(`ลบไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true }); return; }
+  delete state.groups[groupName];
+  render();
+  toast(`ลบกลุ่ม "${groupName}" จากคลังแล้ว`);
+}
 
-  isActivelyEditing = true;
-  const currentTitle = titleTextSpan.textContent;
+async function deleteTab(groupName, url, title) {
+  const response = await send({ type: MSG.DELETE_TAB, payload: { groupName, url } });
+  if (!response?.ok) { toast(`ลบไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true }); return; }
+  const record = state.groups[groupName];
+  if (record) {
+    delete record.tabs[url];
+    if (Object.keys(record.tabs).length === 0) delete state.groups[groupName];
+  }
+  render();
+  toast(`ลบแล้ว "${title}"`);
+}
+
+/** ลบแท็บที่จำไว้หลายรายการที่ tick ไว้ (IDLE เท่านั้น — แท็บตื่นไม่ถูกเลือกได้อยู่แล้ว) */
+async function deleteTabsSelected(groupName, urls) {
+  if (urls.length === 0) return;
+  const ok = await confirmModal(
+    `ลบแท็บที่จำไว้ ${urls.length} รายการ?`,
+    `ออกจากคลัง "${groupName}" — แท็บบนเบราว์เซอร์ไม่ถูกแตะ`,
+    { okLabel: "ลบ" }
+  );
+  if (!ok) return;
+  const response = await send({ type: MSG.DELETE_TABS, payload: { groupName, urls } });
+  if (!response?.ok) { toast(`ลบไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true }); return; }
+  await refresh();
+  toast(`ลบแท็บที่จำไว้ ${response.removed ?? urls.length} รายการแล้ว`);
+}
+
+function startRename(summaryEl, renameBtn, groupName) {
+  const chip = summaryEl.querySelector(".chip");
+  if (!chip || summaryEl.querySelector(".chip-input")) return;
+
   const input = document.createElement("input");
   input.type = "text";
-  input.className = "win-title-input";
-  input.value = currentTitle;
-
-  let renameCancelled = false;
-  const saveRename = async () => {
-    isActivelyEditing = false;
-    if (renameCancelled) {
-      input.replaceWith(titleTextSpan);
-      return;
-    }
-    const newName = input.value.trim();
-    if (newName && newName !== currentTitle) {
-      const updatedSpan = document.createElement("span");
-      updatedSpan.className = "win-title-text";
-      updatedSpan.dataset.action = "toggle-window";
-      updatedSpan.dataset.uuid = uuid;
-      updatedSpan.title = "Click header to collapse/expand";
-      updatedSpan.textContent = newName;
-      input.replaceWith(updatedSpan);
-
-      const result = await sendBackgroundMessage(MESSAGE_TYPES.RENAME_WINDOW, {
-        windowUuid: uuid,
-        newName
-      });
-      if (result?.success) {
-        showToast(`Window renamed to "${newName}"`);
-        await loadState();
-      } else {
-        showToast("Could not save the new window name");
-        await loadState();
-      }
-    } else {
-      input.replaceWith(titleTextSpan);
-    }
-  };
-
-  input.addEventListener("click", (e) => e.stopPropagation());
-  input.addEventListener("mousedown", (e) => e.stopPropagation());
-  input.addEventListener("mouseup", (e) => e.stopPropagation());
-
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      input.blur();
-    } else if (e.key === "Escape") {
-      renameCancelled = true;
-      isActivelyEditing = false;
-      input.replaceWith(titleTextSpan);
-    }
-  });
-
-  input.addEventListener("blur", saveRename, { once: true });
-  titleTextSpan.replaceWith(input);
+  input.className = "chip-input";
+  input.value = groupName;
+  input.setAttribute("aria-label", "ชื่อกลุ่มใหม่");
+  chip.replaceWith(input);
+  renameBtn.style.display = "none";
   input.focus();
   input.select();
-}
 
-/**
- * Restores missing tabs from an archive window to active window.
- */
-async function triggerSyncWindow(uuid) {
-  if (typeof chrome !== "undefined" && chrome.windows) {
-    let winId = null;
-    if (chrome.windows.getCurrent) {
-      const currentWin = await chrome.windows.getCurrent();
-      winId = currentWin?.id || null;
-    }
-    if (!winId && chrome.windows.getLastFocused) {
-      const focusedWin = await chrome.windows.getLastFocused();
-      winId = focusedWin?.id || null;
-    }
-
-    if (!winId) {
-      showToast("❌ Could not identify active window");
-      return;
-    }
-
-    const selected = selectedTabsMap.get(uuid);
-    const selectedIndices = selected ? Array.from(selected) : undefined;
-
-    const res = await sendBackgroundMessage(MESSAGE_TYPES.SYNC_WINDOW_TO_ACTIVE, {
-      targetUuid: uuid,
-      activeWindowId: winId,
-      selectedIndices
-    });
-
-    if (res && res.success) {
-      const partial = res.failedCount ? ` (${res.failedCount} failed)` : "";
-      showToast(`✅ Restored ${res.restoredCount} missing tabs${partial}`);
-      loadState();
-    } else {
-      showToast(`❌ Restore failed: ${res?.error || "Unknown error"}`);
-    }
-  }
-}
-
-async function triggerRestoreRecoveryCheckpoint(timestamp) {
-  if (!Number.isFinite(Number(timestamp)) || typeof chrome === "undefined" || !chrome.windows) return;
-  let winId = null;
-  if (chrome.windows.getCurrent) {
-    const currentWin = await chrome.windows.getCurrent();
-    winId = currentWin?.id || null;
-  }
-  if (!winId && chrome.windows.getLastFocused) {
-    const focusedWin = await chrome.windows.getLastFocused();
-    winId = focusedWin?.id || null;
-  }
-  if (!winId) {
-    showToast("❌ Could not identify active window");
-    return;
-  }
-
-  const result = await sendBackgroundMessage(MESSAGE_TYPES.RESTORE_RECOVERY_CHECKPOINT, {
-    timestamp: Number(timestamp),
-    activeWindowId: winId
-  });
-  if (result?.success) {
-    showToast(`✅ Restored ${result.restoredCount || 0} missing tabs from checkpoint`);
-    await loadState();
-  } else {
-    showToast(`❌ Restore failed: ${result?.error || "Unknown error"}`);
-  }
-}
-
-recoveryCheckpointsList.addEventListener("click", event => {
-  const button = event.target.closest('[data-action="restore-recovery"]');
-  if (button) triggerRestoreRecoveryCheckpoint(button.dataset.timestamp);
-});
-
-btnRestoreAlertCheckpoint.addEventListener("click", () => {
-  triggerRestoreRecoveryCheckpoint(btnRestoreAlertCheckpoint.dataset.timestamp);
-});
-
-btnDismissRecoveryAlert.addEventListener("click", async () => {
-  const result = await sendBackgroundMessage(MESSAGE_TYPES.ACKNOWLEDGE_RECOVERY_ALERT);
-  if (result?.success) {
-    showToast("Current tabs accepted; checkpoint rotation resumed");
-    await loadState();
-  }
-});
-
-// -------------------------------------------------------------
-// Live Search Filtering (0ms DOM Class Toggling)
-// -------------------------------------------------------------
-
-function applyLiveSearchFilter() {
-  const query = currentSearchQuery.toLowerCase();
-  const allRows = document.querySelectorAll(".tab-row");
-
-  allRows.forEach((row) => {
-    const text = row.dataset.searchText || "";
-    const matches = query === "" || text.includes(query);
-    row.classList.toggle("search-hidden", !matches);
-  });
-
-  // Auto-expand cards with matching tabs during search
-  if (query) {
-    document.querySelectorAll(".window-card").forEach((card) => {
-      const hasVisibleTabs = card.querySelector(".tab-row:not(.search-hidden)");
-      card.classList.toggle("search-hidden", !hasVisibleTabs);
-      if (hasVisibleTabs) {
-        card.classList.remove("collapsed");
-      }
-    });
-  } else {
-    document.querySelectorAll(".window-card").forEach((card) => {
-      card.classList.remove("search-hidden");
-      const uuid = card.dataset.windowUuid;
-      card.classList.toggle("collapsed", collapsedWindows.has(uuid));
-    });
-  }
-}
-
-searchInput.addEventListener("input", (e) => {
-  currentSearchQuery = e.target.value.trim();
-  clearSearchBtn.classList.toggle("hidden", currentSearchQuery === "");
-
-  if (searchDebounceTimer) cancelAnimationFrame(searchDebounceTimer);
-  searchDebounceTimer = requestAnimationFrame(() => {
-    applyLiveSearchFilter();
-  });
-});
-
-clearSearchBtn.addEventListener("click", () => {
-  searchInput.value = "";
-  currentSearchQuery = "";
-  clearSearchBtn.classList.add("hidden");
-  applyLiveSearchFilter();
-});
-
-// Toggle All Collapse/Expand
-btnCollapseAllActive.addEventListener("click", () => {
-  const cards = activeWindowsList.querySelectorAll(".window-card");
-  const anyOpen = Array.from(cards).some(c => !c.classList.contains("collapsed"));
-  cards.forEach(c => {
-    const uuid = c.dataset.windowUuid;
-    if (anyOpen) {
-      c.classList.add("collapsed");
-      if (uuid) collapsedWindows.add(uuid);
-    } else {
-      c.classList.remove("collapsed");
-      if (uuid) collapsedWindows.delete(uuid);
-    }
-  });
-});
-
-btnCollapseAllClosed.addEventListener("click", () => {
-  const cards = closedWindowsList.querySelectorAll(".window-card");
-  const anyOpen = Array.from(cards).some(c => !c.classList.contains("collapsed"));
-  cards.forEach(c => {
-    const uuid = c.dataset.windowUuid;
-    if (anyOpen) {
-      c.classList.add("collapsed");
-      if (uuid) collapsedWindows.add(uuid);
-    } else {
-      c.classList.remove("collapsed");
-      if (uuid) collapsedWindows.delete(uuid);
-    }
-  });
-});
-
-// -------------------------------------------------------------
-// Setup Guide & OS Switcher
-// -------------------------------------------------------------
-
-const osCommands = {
-  linux: 'python3 "$HOME/Documents/Src Code/sync tab/native-host/install.py"',
-  mac: 'python3 "$HOME/Documents/Src Code/sync tab/native-host/install.py"',
-  win: 'python "%USERPROFILE%\\Documents\\Src Code\\sync tab\\native-host\\install.py"'
-};
-
-function initOsTabs() {
-  const osTabs = document.querySelectorAll(".os-tab-btn");
-  const cmdText = document.getElementById("setup-cmd-text");
-  if (!osTabs.length || !cmdText) return;
-
-  const ua = navigator.userAgent.toLowerCase();
-  let defaultOs = "linux";
-  if (ua.includes("win")) defaultOs = "win";
-  else if (ua.includes("mac")) defaultOs = "mac";
-
-  const setOs = (osKey) => {
-    osTabs.forEach(btn => {
-      btn.classList.toggle("active", btn.getAttribute("data-os") === osKey);
-    });
-    cmdText.textContent = osCommands[osKey] || osCommands.linux;
+  const restoreUI = () => {
+    input.replaceWith(chip);
+    renameBtn.style.display = "";
   };
 
-  setOs(defaultOs);
-
-  osTabs.forEach(btn => {
-    btn.addEventListener("click", () => {
-      const os = btn.getAttribute("data-os");
-      if (os) setOs(os);
-    });
-  });
-}
-
-btnCopyCmd.addEventListener("click", async () => {
-  const text = document.getElementById("setup-cmd-text").textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    btnCopyCmd.textContent = "✅ Copied!";
-    setTimeout(() => { btnCopyCmd.textContent = "📋 Copy"; }, 2000);
-    showToast("Command copied to clipboard!");
-  } catch {
-    showToast("Failed to copy automatically");
-  }
-});
-
-btnTestConnection.addEventListener("click", async () => {
-  btnTestConnection.textContent = "Testing...";
-  const res = await sendBackgroundMessage(MESSAGE_TYPES.TEST_NATIVE_CONNECTION);
-  btnTestConnection.textContent = "🔄 Test Connection";
-  if (res && res.success && res.data?.connected) {
-    showToast("🟢 Connected to SQLite Database successfully!");
-    loadState();
-  } else {
-    const err = res?.data?.error || "Native Host not detected";
-    showToast(`🟡 ${err} (Tip: Click Reload 🔄 in edge://extensions)`);
-  }
-});
-
-// Manual Snapshot Backup Button
-btnManualBackup.addEventListener("click", async () => {
-  const res = await sendBackgroundMessage(MESSAGE_TYPES.TRIGGER_MANUAL_BACKUP);
-  if (res && res.success) {
-    showToast(`💾 Snapshot Backup Created (${res.data?.totalTabs || 0} tabs)`);
-  }
-});
-
-// Modals
-btnSettingsToggle.addEventListener("click", () => settingsModal.classList.remove("hidden"));
-btnCloseSettings.addEventListener("click", () => settingsModal.classList.add("hidden"));
-
-btnExportMenu.addEventListener("click", () => exportModal.classList.remove("hidden"));
-btnCloseExport.addEventListener("click", () => exportModal.classList.add("hidden"));
-
-// Save Settings
-btnSaveSettings.addEventListener("click", async () => {
-  const payload = {
-    autoRestoreOnStartup: setAutoRestore ? setAutoRestore.checked : true,
-    lazyRestore: setLazyRestore.checked,
-    autoCleanBlankNewTab: setAutoClean.checked,
-    stripTrackingParams: setStripTracking.checked,
-    blacklistDomains: (setBlacklistDomains?.value || "")
-      .split(/\r?\n/)
-      .map(domain => domain.trim())
-      .filter(Boolean)
-      .slice(0, 100),
-    maxClosedWindowsRetention: Math.max(1, Math.min(5, parseInt(setRetention.value, 10) || 5))
+  const commit = async () => {
+    const newName = input.value.trim();
+    if (!newName || newName === groupName) { restoreUI(); return; }
+    const response = await send({ type: MSG.RENAME_GROUP, payload: { groupName, newName } });
+    if (!response?.ok) { toast(`เปลี่ยนชื่อไม่สำเร็จ: ${response?.error ?? "?"}`, { warn: true }); restoreUI(); return; }
+    await refresh();
+    toast(`เปลี่ยนชื่อเป็น "${newName}" แล้ว`);
   };
 
-  await sendBackgroundMessage(MESSAGE_TYPES.UPDATE_SETTINGS, payload);
-  settingsModal.classList.add("hidden");
-  showToast("Settings updated successfully");
-  loadState();
-});
-
-// Export JSON
-btnExportJson.addEventListener("click", async () => {
-  const res = await sendBackgroundMessage(MESSAGE_TYPES.EXPORT_DATA, { format: "json" });
-  if (res && res.success && res.data) {
-    downloadFile(`synctab-backup-${Date.now()}.json`, res.data, "application/json");
-    showToast("JSON Backup Downloaded");
-  }
-});
-
-// Export Markdown
-btnExportMd.addEventListener("click", async () => {
-  const res = await sendBackgroundMessage(MESSAGE_TYPES.EXPORT_DATA, { format: "markdown" });
-  if (res && res.success && res.data) {
-    downloadFile(`synctab-export-${Date.now()}.md`, res.data, "text/markdown");
-    showToast("Markdown List Downloaded");
-  }
-});
-
-// Import JSON
-importFileInput.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  // Avoid reading an unexpectedly large backup into popup memory and sending it
-  // through extension messaging. Normal exports are far smaller than this limit.
-  const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
-  if (file.size > MAX_IMPORT_BYTES) {
-    showToast("❌ Backup file is too large (maximum 10 MB)");
-    importFileInput.value = "";
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = async (evt) => {
-    const content = evt.target?.result;
-    if (typeof content === "string") {
-      const res = await sendBackgroundMessage(MESSAGE_TYPES.IMPORT_DATA, { jsonContent: content });
-      if (res && res.success) {
-        showToast("✅ Backup imported successfully!");
-        exportModal.classList.add("hidden");
-        loadState();
-      } else {
-        showToast("❌ Failed to import backup file");
-      }
-    }
-  };
-  reader.readAsText(file);
-});
-
-function downloadFile(filename, content, type) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  // Let the browser begin the download before releasing its object URL.
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function populateSettings(settings) {
-  if (!settings) return;
-  if (setAutoRestore) setAutoRestore.checked = settings.autoRestoreOnStartup !== false;
-  setLazyRestore.checked = Boolean(settings.lazyRestore);
-  setAutoClean.checked = Boolean(settings.autoCleanBlankNewTab);
-  setStripTracking.checked = Boolean(settings.stripTrackingParams);
-  if (setBlacklistDomains) setBlacklistDomains.value = Array.isArray(settings.blacklistDomains)
-    ? settings.blacklistDomains.join("\n")
-    : "";
-  setRetention.value = String(Math.max(1, Math.min(5, settings.maxClosedWindowsRetention || 5)));
-}
-
-function escapeHtml(str) {
-  if (!str) return "";
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-// Initial Load
-document.addEventListener("DOMContentLoaded", () => {
-  initOsTabs();
-  loadState();
-});
-
-let storageChangeDebounce = null;
-if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged) {
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === "local" && !isActivelyEditing) {
-      if (storageChangeDebounce) clearTimeout(storageChangeDebounce);
-      storageChangeDebounce = setTimeout(() => {
-        loadState();
-      }, 1000);
-    }
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") commit();
+    if (event.key === "Escape") restoreUI();
+    if (event.key === "Enter" || event.key === "Escape") event.preventDefault();
   });
+  input.addEventListener("blur", commit);
 }
 
-// Global capture error listener for failed favicons (CSP-compliant, zero inline handlers)
-window.addEventListener(
-  "error",
-  (e) => {
-    if (e.target && e.target.tagName === "IMG" && e.target.classList.contains("tab-favicon")) {
-      e.target.src = DEFAULT_FAVICON;
-    }
-  },
-  true
-);
+// search filter
+let searchTimer = null;
+$("#search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => renderList(), 120);
+});
+
+// footer timer
+setInterval(renderFooter, 10_000);
+
+refresh();

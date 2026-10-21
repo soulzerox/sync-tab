@@ -1,77 +1,45 @@
 /**
- * JSDoc Type Definitions for Browser Tab Sync Extension
- * @typedef {"grey" | "blue" | "red" | "yellow" | "green" | "pink" | "purple" | "cyan" | "orange"} TabGroupColor
- *
- * @typedef {Object} WindowBounds
- * @property {number} [left]
- * @property {number} [top]
- * @property {number} [width]
- * @property {number} [height]
- * @property {"normal" | "minimized" | "maximized" | "fullscreen"} [state]
- *
- * @typedef {Object} TabGroupData
- * @property {string} title
- * @property {TabGroupColor} color
- * @property {boolean} collapsed
- *
- * @typedef {Object} TabData
- * @property {string} url
- * @property {string} title
- * @property {string} [favIconUrl]
- * @property {boolean} pinned
- * @property {number} index
- * @property {TabGroupData} [group]
- *
- * @typedef {Object} WindowData
- * @property {string} windowUuid
- * @property {string} [customName]
- * @property {boolean} isClosed
- * @property {boolean} [isPinnedTemplate]
- * @property {number} [closedAt]
- * @property {number} lastUpdated
- * @property {WindowBounds} [bounds]
- * @property {TabData[]} tabs
- *
- * @typedef {Object} PreviousSessionBackup
- * @property {number} timestamp
- * @property {"last_window_close" | "browser_shutdown" | "crash_recovery" | "manual_checkpoint"} triggerReason
- * @property {number} totalWindows
- * @property {number} totalTabs
- * @property {WindowData[]} windows
- *
- * @typedef {Object} RecoveryCheckpoint
- * @property {number} timestamp
- * @property {number} lastVerifiedAt
- * @property {number} totalWindows
- * @property {number} totalTabs
- * @property {string} fingerprint
- * @property {WindowData[]} windows
- *
- * @typedef {Object} RecoveryAlert
- * @property {number} detectedAt
- * @property {number} lostTabs
- * @property {number} previousTabCount
- * @property {number} currentTabCount
- * @property {number} checkpointTimestamp
- *
- * @typedef {Object} ExtensionSettings
- * @property {boolean} [autoRestoreOnStartup]
- * @property {"auto" | "chrome_storage" | "sqlite_native"} storageDriver
- * @property {string} sqliteDbPath
- * @property {boolean} lazyRestore
- * @property {boolean} autoCleanBlankNewTab
- * @property {number} maxClosedWindowsRetention
- * @property {boolean} stripTrackingParams
- * @property {string[]} blacklistDomains
- *
- * @typedef {Object} SyncedStorageSchema
- * @property {string} version
- * @property {Record<string, WindowData>} activeWindows
- * @property {Record<string, WindowData>} closedWindows
- * @property {PreviousSessionBackup} [previousSessionBackup]
- * @property {RecoveryCheckpoint[]} recoveryCheckpoints
- * @property {RecoveryAlert|null} recoveryAlert
- * @property {ExtensionSettings} settings
+ * Type definitions (JSDoc) — SyncTab Group Sync v3
+ * Specification: SOT v3.0.0 §2 Data Model
  */
 
+/**
+ * @typedef {"grey"|"blue"|"red"|"yellow"|"green"|"pink"|"purple"|"cyan"|"orange"} GroupColor
+ */
+
+/**
+ * แท็บหนึ่งรายการในคลัง (identity = normalized URL; liveCount > 0 = ตื่น, 0 = หลับ)
+ * @typedef {object} TabRecord
+ * @property {string} url            key + identity (normalized)
+ * @property {string} title
+ * @property {string} [favIconUrl]
+ * @property {number} order          ลำดับ restore (ลำดับการถูกเห็นครั้งแรก)
+ * @property {number} addedAt        epoch ms ครั้งแรกที่ถูกบันทึก
+ * @property {number} [lastLiveAt]   epoch ms ล่าสุดที่เป็น live
+ * @property {number} [closedAt]     epoch ms ล่าสุดที่ flip จาก live -> idle
+ * @property {number} liveCount      จำนวน instance ที่กำลังเปิด (รวมหลายหน้าต่าง/แท็บซ้ำ)
+ */
+
+/**
+ * กลุ่มหนึ่งก้อนในคลัง (identity = ชื่อกลุ่มตรงตัว case-sensitive)
+ * @typedef {object} GroupRecord
+ * @property {string} name
+ * @property {GroupColor} color        สีล่าสุดที่เห็นจาก browser
+ * @property {number} createdAt
+ * @property {number} updatedAt
+ * @property {number[]} liveWindowIds  windowIds (session-scoped) ที่มี live group ชื่อนี้
+ * @property {Record<string, TabRecord>} tabs  key = normalized URL
+ */
+
+/**
+ * Schema เดี่ยวของคลังใน chrome.storage.local (key: groupsSync)
+ * @typedef {object} StorageSchema
+ * @property {3} version
+ * @property {Record<string, GroupRecord>} groups key = ชื่อกลุ่ม
+ * @property {"dark"|"light"|"auto"} [themePreference]
+ * @property {number} [lastScanAt]
+ * @property {number} [migrationNoticeAt]
+ */
+
+/** Payload ที่ popup ได้รับจาก GET_STATE */
 export {};

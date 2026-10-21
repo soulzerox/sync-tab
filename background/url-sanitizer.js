@@ -6,6 +6,7 @@
 import {
   IGNORED_URL_PREFIXES,
   TRACKING_PARAM_PREFIXES,
+  VOLATILE_PARAM_NAMES,
   THRESHOLDS
 } from "../shared/constants.js";
 
@@ -54,7 +55,9 @@ export function isBlacklistedUrl(url, blacklistDomains = []) {
 
 /**
  * Normalizes a URL for comparison and storage.
- * Standardizes protocol, hostname lowercase, strips trailing slash, and strips marketing tracking parameters.
+ * Standardizes protocol, hostname lowercase, strips trailing slash, strips URL fragment (#hash),
+ * and (legacy path) marketing tracking parameters.
+ * v3 dedupe rule: หน้าเดียวกันเปิดพร้อม fragment ต่างกัน (เช่น #สถิติรายได้) = record เดียวกัน
  * @param {string} url
  * @param {boolean} [stripTracking=true]
  * @returns {string}
@@ -66,13 +69,19 @@ export function normalizeUrl(url, stripTracking = true) {
   try {
     const parsed = new URL(trimmed);
 
+    // ตัด fragment #hash ทิ้งเสมอ — ฐาน dedupe คือ "หน้า" ไม่ใช่ตำแหน่ง scroll และแท็กฝั่งเว็บ
+    parsed.hash = "";
+
     if (stripTracking && parsed.search) {
       const searchParams = new URLSearchParams(parsed.search);
       const keysToDelete = [];
 
       for (const key of searchParams.keys()) {
         const lowerKey = key.toLowerCase();
-        if (TRACKING_PARAM_PREFIXES.some(prefix => lowerKey.startsWith(prefix))) {
+        if (
+          TRACKING_PARAM_PREFIXES.some(prefix => lowerKey.startsWith(prefix)) ||
+          VOLATILE_PARAM_NAMES.some(name => lowerKey === name.toLowerCase())
+        ) {
           keysToDelete.push(key);
         }
       }
@@ -80,6 +89,8 @@ export function normalizeUrl(url, stripTracking = true) {
       for (const key of keysToDelete) {
         searchParams.delete(key);
       }
+      // v3.4 — เรียง param ให้ ?a=1&b=2 กับ ?b=2&a=1 เป็น key เดียวกัน (dedupe แท็บหลับซ้ำ)
+      searchParams.sort();
 
       parsed.search = searchParams.toString() ? `?${searchParams.toString()}` : "";
     }
