@@ -7,6 +7,7 @@ import {
   IGNORED_URL_PREFIXES,
   TRACKING_PARAM_PREFIXES,
   VOLATILE_PARAM_NAMES,
+  VOLATILE_PATH_PATTERNS,
   THRESHOLDS
 } from "../shared/constants.js";
 
@@ -93,6 +94,11 @@ export function normalizeUrl(url, stripTracking = true) {
       searchParams.sort();
 
       parsed.search = searchParams.toString() ? `?${searchParams.toString()}` : "";
+    }
+
+    // v3.6 — ตัด session-id segment ใน path (ยุบบทสนทนาแยก path เป็นหน้าเดียวกัน)
+    for (const pattern of VOLATILE_PATH_PATTERNS) {
+      parsed.pathname = parsed.pathname.replace(pattern, "/session/$1");
     }
 
     let normalized = parsed.toString();
