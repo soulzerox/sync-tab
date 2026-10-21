@@ -507,3 +507,39 @@ test("v3.1: renameGroup เปลี่ยน binding ตามชื่อก�
   await store.flush();
   assert.deepEqual(store.liveBinding(5), { groupName: "ใหม่", urlKey: "https://a/x", restored: false, sleeping: false });
 });
+
+// v3.5 — dedupe volatile params (tab/draftId): migration บน boot รวมแถวฝาแฝด
+// ------------------------------------------------------------------
+
+test("renormalize migration: แถว /settings?tab=servers + /new-session?draftId= ถูกยุบทิ้งเป็น key เดียว", async () => {
+  const SETTINGS = "https://opencode.753153268.xyz/settings";
+  const SETTINGS_TAB = `${SETTINGS}?tab=servers`;
+  const SESSION = "https://opencode.753153268.xyz/new-session";
+  const DRAFT = `${SESSION}?draftId=4bb90d39-d510-47dc-9775-7ff49d81f37a`;
+  const seed = {
+    [STORAGE_KEY]: {
+      version: 3,
+      groups: {
+        "Developer Tools": {
+          name: "Developer Tools",
+          color: "purple",
+          createdAt: 10,
+          updatedAt: 10,
+          liveWindowIds: [],
+          tabs: {
+            [SETTINGS]: { url: SETTINGS, title: "OpenCode", favIconUrl: "", addedAt: 500, lastLiveAt: 500, closedAt: 900, liveCount: 0, order: 1 },
+            [SETTINGS_TAB]: { url: SETTINGS_TAB, title: "OpenCode", favIconUrl: "", addedAt: 400, lastLiveAt: 400, closedAt: 950, liveCount: 0, order: 2 },
+            [DRAFT]: { url: DRAFT, title: "OpenCode", favIconUrl: "", addedAt: 300, lastLiveAt: 300, closedAt: 960, liveCount: 0, order: 3 }
+          }
+        }
+      }
+    }
+  };
+  const { store } = createStore(seed);
+  await store.init();
+
+  const g = store.getGroups()["Developer Tools"];
+  assert.deepEqual(Object.keys(g.tabs).sort(), [SESSION, SETTINGS].sort(), "เหลือ 2 records: /settings และ /new-session");
+  assert.equal(g.tabs[SETTINGS].addedAt, 400, "merge เอาฝั่งเก่าสุด");
+  assert.equal(g.tabs[SESSION].addedAt, 300);
+});

@@ -87,5 +87,12 @@ export const TRACKING_PARAM_PREFIXES = Object.freeze([
   "yclid"
 ]);
 
+/**
+ * v3.5 — query-param ที่เป็นสถานะภายในหน้า (SPA) ไม่ใช่ตัวระบุเอกสาร:
+ * `draftId` (OpenCode draft), `tab` (แท็บย่อยในหน้าเดียวกัน) → หน้าเดียวกันถือ key เดียว
+ * ยังแยก session id ใน path ออกตามเดิม (คนละบทสนทนาจริง ๆ)
+ */
+export const VOLATILE_PARAM_NAMES = Object.freeze(["draftId", "tab"]);
+
 /** ทิศทางธีม popup (บันทึกใน schema.themepreference) */
 export const THEME_PREFERENCES = Object.freeze(["dark", "light", "auto"]);

@@ -63,3 +63,26 @@ test("normalizeUrl (v3.4): เรียง param — ลำดับต่าง
     "?a=1&b=2 กับ ?b=2&a=1 เป็นหน้าเดียวกัน"
   );
 });
+
+test("normalizeUrl (v3.5): ตัด volatile params — draftId/tab ไม่ใช่ตัวระบุเอกสาร (dedupe หน้าเดียวกัน)", () => {
+  assert.equal(
+    normalizeUrl("https://opencode.753153268.xyz/settings?tab=servers"),
+    normalizeUrl("https://opencode.753153268.xyz/settings"),
+    "?tab=servers คือหน้า /settings เดียวกัน"
+  );
+  assert.equal(
+    normalizeUrl("https://opencode.753153268.xyz/new-session?draftId=4bb90d39-d510-47dc-9775-7ff49d81f37a"),
+    "https://opencode.753153268.xyz/new-session",
+    "draftId เปลี่ยนทุกครั้ง ไม่ควรสร้าง record ใหม่"
+  );
+  assert.equal(
+    normalizeUrl("https://s.com/p?TAB=x&id=7"),
+    "https://s.com/p?id=7",
+    "ชื่อ param เทียบแบบไม่สนตัวพิมพ์, param จริง (id) คงไว้"
+  );
+  assert.equal(
+    normalizeUrl("https://www.youtube.com/watch?v=abc") === normalizeUrl("https://www.youtube.com/watch?v=def"),
+    false,
+    "param ที่ระบุเอกสารจริง (v=) ต้องไม่ถูกยุบ"
+  );
+});

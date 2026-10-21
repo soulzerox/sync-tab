@@ -6,6 +6,7 @@
 import {
   IGNORED_URL_PREFIXES,
   TRACKING_PARAM_PREFIXES,
+  VOLATILE_PARAM_NAMES,
   THRESHOLDS
 } from "../shared/constants.js";
 
@@ -77,7 +78,10 @@ export function normalizeUrl(url, stripTracking = true) {
 
       for (const key of searchParams.keys()) {
         const lowerKey = key.toLowerCase();
-        if (TRACKING_PARAM_PREFIXES.some(prefix => lowerKey.startsWith(prefix))) {
+        if (
+          TRACKING_PARAM_PREFIXES.some(prefix => lowerKey.startsWith(prefix)) ||
+          VOLATILE_PARAM_NAMES.some(name => lowerKey === name.toLowerCase())
+        ) {
           keysToDelete.push(key);
         }
       }

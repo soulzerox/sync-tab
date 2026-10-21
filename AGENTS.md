@@ -10,7 +10,7 @@ Chrome/Edge extension "SyncTab — Group Sync" (MV3). Group-only tab sync: mirro
 - `background/restore-engine.js` — restore flow: diff → create → ensure-URL → group → setColor → รอ commit จริง (`changeInfo.title`/`status:"complete"` เท่านั้น — `changeInfo.url`/`{status:"loading"}` ยังไม่นับ) → discard, staggered + mutex
 - `background/debug-log.js` — debug log รายละเอียดทุกขั้น (ring buffer 1000): scope restore/mirror/store/sw; อ่านจาก SW devtools `__syncTabLogs.getLogs()` หรือ RPC GET_DEBUG_LOGS; console.debug เปิดผ่าน `enableConsole`
 - `background/sync-backup.js` — เงาสำรองคลังไป `chrome.storage.sync` (compact + chunk ≤6800, throttle 5 นาที, กู้เฉพาะ local ว่างจริง)
-- `background/url-sanitizer.js` — URL filtering/normalizing; v3.1 strips `#hash` + tracking params (`TRACKING_PARAM_PREFIXES`: `__cf_chl`, `utm_`, `fbclid`, `gclid`, …) as the record dedupe base
+- `background/url-sanitizer.js` — URL filtering/normalizing; v3.1 strips `#hash` + tracking params (`TRACKING_PARAM_PREFIXES`: `__cf_chl`, `utm_`, `fbclid`, `gclid`, …) as the record dedupe base; v3.5 also strips volatile SPA params (`VOLATILE_PARAM_NAMES`: `draftId`, `tab`) so `/settings?tab=x` = `/settings`
 - `popup/` — popup UI (html/css/js; tokens in `design-system/synctab/pages/popup.md`)
 - `shared/` — `constants.js` (schema/keys/timings), `messages.js` (MSG RPC + theme values), `types.js` (JSDoc), `ui-utils.js` (pure popup helpers)
 - `test/` — `node --test` suites with the shared fake-chrome harness (`test/fake-chrome.js`)
