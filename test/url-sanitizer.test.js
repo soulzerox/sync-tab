@@ -86,3 +86,33 @@ test("normalizeUrl (v3.5): ตัด volatile params — draftId/tab ไม่�
     "param ที่ระบุเอกสารจริง (v=) ต้องไม่ถูกยุบ"
   );
 });
+
+test("normalizeUrl (v3.6): ตัด session-id path segment (/session/ses_*) → บทสนทนาแยก path เหลือหน้าเดียวกัน", () => {
+  const raw = "https://opencode.753153268.xyz/server/aHR0cHM6Ly9vcGVuY29kZS43NTMxNTMyNjgueHl6/session/";
+  const norm = raw.replace(/\/$/, "");
+  assert.equal(
+    normalizeUrl(`${raw}ses_ead0e7463ffeK2yrzRSuWHXUTN`),
+    norm,
+    "ses_ead0e746 → 剥离เป็น /session/"
+  );
+  assert.equal(
+    normalizeUrl(`${raw}ses_ec9ce99b9ffeM6UMMxlGxhnGGn`),
+    norm,
+    "ses_ec9ce99b → 同上 (key เดียวกับตัวบน)"
+  );
+  assert.equal(
+    normalizeUrl(`${raw}ses_ec9d2c7caffe7o4Pg4L46wOIxg?foo=1`),
+    `${norm}/?foo=1`,
+    "session id 剥离, 真参数 foo=1 仍保留"
+  );
+  assert.equal(
+    normalizeUrl("https://opencode.753153268.xyz/session/settings"),
+    "https://opencode.753153268.xyz/session/settings",
+    "/session/settings (slug จริง) ต้องไม่ถูกตัด"
+  );
+  assert.equal(
+    normalizeUrl(`${raw}ses_ead0e7463ffeK2yrzRSuWHXUTN`),
+    normalizeUrl(`${raw}ses_ec9d2c7caffe7o4Pg4L46wOIxg`),
+    "สองบทสนทนาต่าง id → normalized key เดียวกัน (dedupe)"
+  );
+});

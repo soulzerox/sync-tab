@@ -94,5 +94,14 @@ export const TRACKING_PARAM_PREFIXES = Object.freeze([
  */
 export const VOLATILE_PARAM_NAMES = Object.freeze(["draftId", "tab"]);
 
+/**
+ * v3.6 — path segment ที่เป็น id เฉพาะเซสชัน ไม่ใช่ตัวระบุเอกสาร:
+ * `/session/ses_<id>` → 剥離 session id เหลือ `/session/` (OpenCode บทสนทนาแต่ละบท = คนละ path แต่ popup มองเป็นหน้าเดียวกัน → dedupe)
+ * คง segment อื่นทุกตัวไว้ (slug บทนิยาย ฯลฯ = เอกสารจริง)
+ */
+export const VOLATILE_PATH_PATTERNS = Object.freeze([
+  /\/session\/ses_[A-Za-z0-9_-]{4,}(\/|$)/,
+]);
+
 /** ทิศทางธีม popup (บันทึกใน schema.themepreference) */
 export const THEME_PREFERENCES = Object.freeze(["dark", "light", "auto"]);
